@@ -6,6 +6,14 @@ All notable changes to `@boxline/sdk`. The SDK follows [semantic versioning](htt
 
 ### Added
 
+- **Partial results from a several-page extract**: a page that did not load (`page_unreachable`, `page_timeout`) or is
+  not a web page is listed in `pages` with `status: null`, `finalUrl: null` and `error: {code, message}`, and the call
+  fails only when none load.
+- **`NotAWebPageError`** (422 `not_a_web_page`, `ErrorCode.notAWebPage`, not retried): `fetch` or `extract` of an
+  address that answers with a PDF or another document Chrome only displays.
+- **`exec()` reads the streamed answer**: headers come at once, so a command after a long session setup no longer hits
+  Node's 300 s headers timeout; `execStream` skips the API's `waiting` and `ping` lines and throws an `error` line as
+  the error it names; both allow up to 10 minutes of setup before the command's own time limit.
 - **Own model keys and a default model**: `bx.project.modelKeys()`, `setModelKey(provider, {key?, use?})` and `deleteModelKey(provider)`
   (a key is write-only: `preview` is its last 4 characters); `defaultModel` in `project.settings()` / `setSettings()`;
   `keySource` (`"project"` | `"platform"`) on agent runs, extract results and `agent.models()` providers; `AgentProvider` now also
