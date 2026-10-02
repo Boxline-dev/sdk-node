@@ -1,0 +1,59 @@
+{
+  "name": "@boxline/sdk",
+  "version": "1.1.0",
+  "description": "Node and TypeScript SDK for Boxline: cloud browsers and shell sandboxes for AI agents, with retries, cursor pages and typed errors.",
+  "keywords": [
+    "boxline",
+    "browser",
+    "headless",
+    "chrome",
+    "playwright",
+    "puppeteer",
+    "cdp",
+    "sandbox",
+    "ai-agents",
+    "automation"
+  ],
+  "license": "MIT",
+  "author": "Boxline",
+  "homepage": "https://docs.boxline.dev",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Boxline-dev/sdk-node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Boxline-dev/sdk-node/issues"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p examples/tsconfig.json",
+    "prepublishOnly": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3",
+    "@types/node": "^22.15.0",
+    "playwright-core": "^1.63.0"
+  }
+}
