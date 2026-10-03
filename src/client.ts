@@ -23,9 +23,12 @@ import type {
   MoveShell,
   Credential,
   CredentialAuditEntry,
+  CredentialCodeAccepted,
+  CredentialCodePush,
   CredentialAuditParams,
   CredentialCreateParams,
   CredentialUpdateParams,
+  CredentialWritten,
   PasswordCredential,
   PasswordCredentialCreateParams,
   SecretCredential,
@@ -117,6 +120,23 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_BASE_URL = "https://api.boxline.dev";
 /** A plain-English step can wait up to 4 minutes for a person to solve a CAPTCHA (session captcha "ask"). */
 const STEP_TIMEOUT_MS = 420_000;
+/** A code wait (a pushed code or one from the credential's codeUrl) can take up to 900 s on the server. */
+const CODE_WAIT_MS = 960_000;
+/** The login action: 15 steps of 30 s plus the longest code wait, with a margin. */
+const LOGIN_TIMEOUT_MS = 1_440_000;
+
+/** How long an action list may take on the server: plain-English steps, code waits and the login action are slow. */
+function actionsWait(list: ActionItem[]): number {
+  const waitsForCode = (text: string) => /%[A-Z0-9_]+\.(otp|link)%/.test(text);
+  let ms = 0;
+  for (const a of list) {
+    if (typeof a === "string") ms = Math.max(ms, STEP_TIMEOUT_MS + (waitsForCode(a) ? CODE_WAIT_MS : 0));
+    else if (a.action === "login") ms = Math.max(ms, LOGIN_TIMEOUT_MS);
+    else if (a.action === "step") ms = Math.max(ms, STEP_TIMEOUT_MS + (waitsForCode(JSON.stringify(a)) ? CODE_WAIT_MS : 0));
+    else if (a.action === "type" && "credential" in a && (a as { field?: string }).field === "otp") ms = Math.max(ms, CODE_WAIT_MS);
+  }
+  return ms;
+}
 
 type Raw = { data: unknown[]; next?: string | null } & Record<string, unknown>;
 
@@ -445,8 +465,7 @@ export class Sessions {
    */
   async actions(id: string, actions: ActionItem[] | ActionItem, opts: { timeoutMs?: number } = {}, options?: RequestOptions): Promise<ActionResult[]> {
     const list = Array.isArray(actions) ? actions : [actions];
-    const wait = list.some((a) => typeof a === "string" || a.action === "step") ? STEP_TIMEOUT_MS : 0;
-    const r = await this.client.request<{ results: ActionResult[] }>("POST", `${sid(id)}/actions`, { actions: list, ...opts }, atLeast(this.client, options, wait));
+    const r = await this.client.request<{ results: ActionResult[] }>("POST", `${sid(id)}/actions`, { actions: list, ...opts }, atLeast(this.client, options, actionsWait(list)));
     return r.results;
   }
 
@@ -652,16 +671,19 @@ export class Credentials {
   }
   /**
    * Stores a credential, sealed; the answer never has a value. `type: "password"` takes `origins`, `username`,
-   * `password` and optionally `totpSecret` (needs the plan's `loginDetails`: FeatureNotInPlanError); `type: "secret"`
-   * takes `value`. CredentialExistsError for a name the project has (change it with update), PlanLimitError beyond the
-   * plan's `maxCredentials`. Not retried by the SDK (the API takes no Idempotency-Key here): a retry after a lost
+   * `password` and optionally where its 2FA codes come from: `codeSource: "totp"` with `totpSecret`, `"push"` (send
+   * each code or sign-in link with `pushCode`) or `"url"` with `codeUrl` (needs the plan's `loginDetails`:
+   * FeatureNotInPlanError); `type: "secret"` takes `value`. CredentialExistsError for a name the project has (change it
+   * with update), PlanLimitError beyond the plan's `maxCredentials`; 400 `code_url_not_allowed` for a `codeUrl` that is
+   * not a public HTTPS address. With `codeUrl` the answer has `codeUrlSecret`, the key that signs the platform's
+   * requests, shown this once. Not retried by the SDK (the API takes no Idempotency-Key here): a retry after a lost
    * answer may meet CredentialExistsError.
    */
-  create(params: PasswordCredentialCreateParams, options?: RequestOptions): Promise<PasswordCredential>;
-  create(params: SecretCredentialCreateParams, options?: RequestOptions): Promise<SecretCredential>;
-  create(params: CredentialCreateParams, options?: RequestOptions): Promise<Credential>;
-  create(params: CredentialCreateParams, options?: RequestOptions): Promise<Credential> {
-    return this.client.request<Credential>("POST", "/v1/credentials", params, options);
+  create(params: PasswordCredentialCreateParams, options?: RequestOptions): Promise<CredentialWritten<PasswordCredential>>;
+  create(params: SecretCredentialCreateParams, options?: RequestOptions): Promise<CredentialWritten<SecretCredential>>;
+  create(params: CredentialCreateParams, options?: RequestOptions): Promise<CredentialWritten>;
+  create(params: CredentialCreateParams, options?: RequestOptions): Promise<CredentialWritten> {
+    return this.client.request<CredentialWritten>("POST", "/v1/credentials", params, options);
   }
   get(name: string, options?: RequestOptions): Promise<Credential> {
     return this.client.request<Credential>("GET", credentialPath(name), undefined, options);
@@ -669,19 +691,39 @@ export class Credentials {
   /**
    * Changes the fields you send (the type cannot change: delete it and create it again). A new site, or a `scope`
    * or `shell` that makes an AI-only credential readable by shells, needs the sensitive values again in the same call
-   * (a secret's `value`; a password's `password`, and `totpSecret` when it has 2FA), else a 400 `invalid_request`; a
-   * 409 `conflict` when the sites, scope or `shell` changed meanwhile (send it again). A running
-   * agent run keeps the values it started with; a session that exports the credential gets the new ones on its next
-   * machine (move, resume, recovery).
+   * (a secret's `value`; a password's `password`, and `totpSecret` when it has 2FA), else a 400 `invalid_request`; so
+   * does a change of where a password's codes come from (`codeSource`, removing 2FA included, or `codeUrl`: the
+   * `password` again). A 409 `conflict` when the sites, scope, `shell`, `codeSource` or `codeUrl` changed meanwhile
+   * (send it again). A new `codeUrl` answers with a new `codeUrlSecret`, shown once. A running agent run keeps the
+   * values it started with; a session that exports the credential gets the new ones on its next machine (move,
+   * resume, recovery).
    */
-  update(name: string, patch: CredentialUpdateParams, options?: RequestOptions): Promise<Credential> {
-    return this.client.request<Credential>("PATCH", credentialPath(name), patch, options);
+  update(name: string, patch: CredentialUpdateParams, options?: RequestOptions): Promise<CredentialWritten> {
+    return this.client.request<CredentialWritten>("PATCH", credentialPath(name), patch, options);
   }
   /** Deletes it; profiles that link it are unlinked, and sessions that exported it no longer get it on their next machine. */
   delete(name: string, options?: RequestOptions): Promise<void> {
     return this.client.request<void>("DELETE", credentialPath(name), undefined, options);
   }
-  /** Changes to credentials and each use (once per session, command, run, script, task run, typed field or 2FA code), newest first. */
+  /**
+   * For a password with `codeSource: "push"`: sends the code (`{code}`) or the sign-in link (`{link}`) the site emailed
+   * or texted, for a run, action or `boxline-otp` that waits for it (the webhook `credential.code_needed` says when).
+   * It is kept sealed for up to 10 minutes and used once, by a wait that began before it arrived. A link must be on one of
+   * the credential's sites (400 `credential_link_wrong_site`). 400 `invalid_request` for a credential whose source is
+   * not "push"; NotFoundError for one the project does not have. Not retried by the SDK (a second push is a second
+   * code). The value is never logged or returned.
+   */
+  pushCode(name: string, code: CredentialCodePush, options?: RequestOptions): Promise<CredentialCodeAccepted> {
+    return this.client.request<CredentialCodeAccepted>("POST", `${credentialPath(name)}/codes`, code, options);
+  }
+  /**
+   * For a password with `codeSource: "url"`: a new `codeUrlSecret` (`whsec_…`, shown this once). Requests to `codeUrl` are
+   * signed with it from now on (check them with `verifyWebhook`); the old one stops at once.
+   */
+  rotateCodeUrlSecret(name: string, options?: RequestOptions): Promise<{ codeUrlSecret: string }> {
+    return this.client.request<{ codeUrlSecret: string }>("POST", `${credentialPath(name)}/code-url-secret`, undefined, options);
+  }
+  /** Changes to credentials and each use (once per session, command, run, script, task run, typed field or 2FA code) and pushed codes, newest first. */
   audit(params: CredentialAuditParams = {}, options?: RequestOptions): PagePromise<CredentialAuditEntry> {
     return this.client.list<CredentialAuditEntry>("/v1/credentials/audit", { ...params }, (e) => e, options);
   }

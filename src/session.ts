@@ -1,6 +1,6 @@
 import type { Boxline } from "./client.js";
 import type { RequestOptions } from "./core.js";
-import { CaptchaTimeoutError, makeError } from "./errors.js";
+import { CaptchaTimeoutError, CredentialLoginFailedError, makeError } from "./errors.js";
 import type { PagePromise, Page } from "./pagination.js";
 import type {
   Action,
@@ -12,6 +12,7 @@ import type {
   ComputerOptions,
   ComputerResult,
   CredentialField,
+  LoginValue,
   DragTarget,
   ExecExit,
   ExecOptions,
@@ -48,6 +49,10 @@ const ACTION_STATUS: Record<string, number> = {
   captcha_timeout: 409,
   model_refused: 422,
   credential_not_found: 404,
+  credential_code_timeout: 408,
+  credential_link_wrong_site: 400,
+  credential_login_failed: 422,
+  credential_login_timeout: 408,
   feature_not_in_plan: 402,
 };
 
@@ -237,6 +242,24 @@ export class Session {
     return r.value as T;
   }
   /**
+   * Signs the browser in with a password credential in one call (default: the one the session's profile links;
+   * `url` is the sign-in page, on one of the credential's sites, default the first). A short agent run does it (at
+   * most 15 steps, browser tools only, only that credential and its sites; the project's default model, counted like an
+   * agent run), and a credential with `codeSource` "push" or "url" waits for its code or sign-in link, which the run never
+   * sees. Resolves to the page it ends on (no query or fragment) and the run's id. Throws CredentialLoginFailedError (its
+   * `runId` is the run; CredentialLoginTimeoutError when it ran out of time and was canceled), CredentialCodeTimeoutError
+   * (no code in time) or CredentialLinkWrongSiteError; needs the plan's
+   * `loginDetails` (FeatureNotInPlanError) and a session with a browser. It runs alone as one action.
+   */
+  async login(credential?: string, opts: { url?: string; allowWithExtensions?: boolean } = {}, options?: RequestOptions): Promise<LoginValue> {
+    const [r] = await this.actions({ action: "login", ...(credential ? { credential } : {}), ...opts }, {}, options);
+    if (r?.ok) return r.value as LoginValue;
+    const code = r?.code ?? "credential_login_failed";
+    const err = makeError(ACTION_STATUS[code] ?? 400, code, r?.error ?? "could not sign in");
+    if (err instanceof CredentialLoginFailedError) err.runId = r?.runId ?? null;
+    throw err;
+  }
+  /**
    * Runs one plain-English step ("click Sign in", "type %email% into the email field"). `credentials: ["NAME"]` lets it
    * use credentials as placeholders (`%NAME%`, `%SHOP.password%`), each on its own sites (see StepOptions).
    */
@@ -271,7 +294,8 @@ export class Session {
   }
   /**
    * Types a credential's value without it passing through you: `field` is `"username"`, `"password"` or `"otp"` (the
-   * current 2FA code, made when it is typed) for a password credential, and left out for a secret. A credential with
+   * current 2FA code, made when it is typed; with `codeSource` "push" or "url" it waits for a fresh one, up to
+   * `codeTimeoutSeconds`, and throws CredentialCodeTimeoutError without one) for a password credential, and left out for a secret. A credential with
    * sites (every password) goes only into the field `selector` names, whose own frame must be on one of its sites,
    * checked right before writing; one without sites may be typed where the focus is. The value is never in the reply
    * or the session's log. Needs scope "agent" or "all" (CredentialNotAllowedError for "shell"); the first use per

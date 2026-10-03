@@ -553,7 +553,12 @@ export type Action =
       targetId?: string;
     }
   /** Structured data from the current page (instruction and/or JSON Schema). */
-  | { action: "extract"; instruction?: string; schema?: Record<string, unknown>; provider?: AgentProvider; model?: string; targetId?: string };
+  | { action: "extract"; instruction?: string; schema?: Record<string, unknown>; provider?: AgentProvider; model?: string; targetId?: string }
+  /**
+   * Signs the browser in with a password credential (default: the one the session's profile links) in one call, see
+   * Session.login. It runs alone: the only action of its request.
+   */
+  | { action: "login"; credential?: string; url?: string; allowWithExtensions?: boolean };
 
 /** An action, or a plain-English step written as a bare string ("click Sign in"). */
 export type ActionItem = Action | string;
@@ -566,9 +571,18 @@ export interface ActionResult {
   /** One line saying what happened ("Dragged from (180, 200) to (400, 200) in 10 steps"); never typed text. */
   text?: string;
   error?: string;
-  /** A stable error code when there is one (e.g. "captcha_timeout", "out_of_viewport"). */
+  /** A stable error code when there is one (e.g. "captcha_timeout", "out_of_viewport"; for `login`: "credential_login_failed", "credential_login_timeout", "credential_code_timeout", "credential_link_wrong_site"). */
   code?: string;
+  /** `login`: the agent run that signed in (also in its value when it worked). */
+  runId?: string;
   ms: number;
+}
+
+/** What `Session.login` returns: the page the browser is on after signing in (no query or fragment) and the run that did it. */
+export interface LoginValue {
+  url: string;
+  title: string;
+  runId: string;
 }
 
 export interface GotoResult {
@@ -1256,7 +1270,8 @@ export interface AgentMessageSent {
 
 export interface AgentStep {
   /** message: a message you sent (agent.sendMessage), recorded when the model received it. */
-  type: "text" | "tool" | "handover" | "handback" | "captcha" | "message";
+  /** code: the run waits for a password's 2FA code or sign-in link (`credentials.pushCode`, or your `codeUrl`), see `state`. */
+  type: "text" | "tool" | "handover" | "handback" | "captcha" | "message" | "code";
   at: string;
   /** message steps: who wrote it, its id, when it was sent (`at` is when the model got it). */
   from?: "user";
@@ -1274,9 +1289,14 @@ export interface AgentStep {
   output?: string;
   isError?: boolean;
   ms?: number;
-  /** captcha steps: "solving" (automatic solving), "waiting" (a person's turn), "solved" (the run goes on). */
-  state?: "solving" | "waiting" | "solved";
-  /** captcha steps: the CAPTCHA kind and the host of its page. */
+  /**
+   * captcha steps: "solving" (automatic solving), "waiting" (a person's turn), "solved" (the run goes on); code steps:
+   * "waiting" (a wait began: push the code or link now), then "received" or "timeout". Never the code or the link.
+   */
+  state?: "solving" | "waiting" | "solved" | "received" | "timeout";
+  /** code steps: the password credential whose code or link the run waits for. */
+  credential?: string;
+  /** captcha steps: the CAPTCHA kind and the host of its page; code steps: "code" or "link". */
   kind?: string;
   host?: string;
   /** captcha "waiting": why a person is asked. */
@@ -1645,6 +1665,7 @@ export type WebhookEventType =
   | "usage.limit_reached"
   | "api_key.created"
   | "api_key.revoked"
+  | "credential.code_needed"
   | "credential.changed"
   | "webhook.changed"
   | "webhook.disabled"
@@ -1956,6 +1977,16 @@ export interface WebhookApiKeyData {
   by: WebhookActor;
 }
 
+export interface WebhookCredentialCodeNeededData {
+  /** The password credential whose code or sign-in link is awaited. */
+  credential: string;
+  /** What the site sends: a 2FA code or a sign-in link. Forward it now with `credentials.pushCode`. */
+  type: "code" | "link";
+  sessionId: string;
+  /** The agent run that waits; null for an action or `boxline-otp`. */
+  runId: string | null;
+}
+
 export interface WebhookCredentialChangedData {
   /** The credential's name. */
   name: string;
@@ -2011,6 +2042,7 @@ export interface WebhookEventDataMap {
   "usage.limit_reached": WebhookUsageLimitData;
   "api_key.created": WebhookApiKeyData;
   "api_key.revoked": WebhookApiKeyData;
+  "credential.code_needed": WebhookCredentialCodeNeededData;
   "credential.changed": WebhookCredentialChangedData;
   "webhook.changed": WebhookChangedData;
   "webhook.disabled": WebhookDisabledData;
@@ -2035,8 +2067,18 @@ export type CredentialType = "password" | "secret";
  */
 export type CredentialScope = "agent" | "shell" | "all";
 
-/** What `Session.typeCredential` types from a password credential: its user name, its password or its current 2FA code. */
+/**
+ * What `Session.typeCredential` types from a password credential: its user name, its password or its current 2FA code
+ * (with a `codeSource` of "push" or "url" it waits for a fresh one, up to `codeTimeoutSeconds`).
+ */
 export type CredentialField = "username" | "password" | "otp";
+
+/**
+ * Where a password's 2FA codes come from: "totp" (an authenticator key, `totpSecret`), "push" (your system sends each
+ * code or sign-in link the site emails or texts: `credentials.pushCode`) or "url" (the platform asks your endpoint
+ * `codeUrl`, signed like a webhook). A password without one has no 2FA (`codeSource: null`).
+ */
+export type CredentialCodeSource = "totp" | "push" | "url";
 
 interface CredentialBase {
   /** Also its placeholder (`%NAME%`, `%NAME.password%`) and its shell variable (`$NAME`, `$NAME_PASSWORD`). */
@@ -2056,8 +2098,14 @@ export interface PasswordCredential extends CredentialBase {
   /** The sites where the AI may type it (1 to 20). */
   origins: string[];
   username: string;
-  /** It has a 2FA key: `%NAME.otp%` and `boxline-otp NAME` give the current code. */
+  /** It has a 2FA key (`codeSource` is "totp"): `%NAME.otp%` and `boxline-otp NAME` give the current code. */
   hasTotp: boolean;
+  /** Where its 2FA codes come from; null: no 2FA. */
+  codeSource: CredentialCodeSource | null;
+  /** The endpoint the platform asks for codes (`codeSource` "url"); null otherwise. Its signing secret is never shown again. */
+  codeUrl: string | null;
+  /** How long a wait for a pushed or asked code or link lasts (5 to 900 s, default 300). */
+  codeTimeoutSeconds: number;
 }
 
 /** A secret (an API key, a token). Its value is never returned. */
@@ -2071,6 +2119,13 @@ export interface SecretCredential extends CredentialBase {
 
 /** A credential without its values: `switch (c.type)` tells the two apart. */
 export type Credential = PasswordCredential | SecretCredential;
+
+/**
+ * A credential as `credentials.create` and `credentials.update` return it: when `codeUrl` was set or changed it also
+ * has `codeUrlSecret` (`whsec_…`), the key that signs the platform's requests to `codeUrl`, shown this once (a new one
+ * any time with `credentials.rotateCodeUrlSecret`).
+ */
+export type CredentialWritten<C extends Credential = Credential> = C & { codeUrlSecret?: string };
 
 interface CredentialCreateBase {
   /**
@@ -2096,10 +2151,22 @@ export interface PasswordCredentialCreateParams extends CredentialCreateBase {
   /** 1 to 1024 characters. Sealed when stored and never returned. */
   password: string;
   /**
+   * Where its 2FA codes come from: "totp" (with `totpSecret`; `totpSecret` alone means "totp"), "push" (send each code
+   * or link with `credentials.pushCode`), "url" (with `codeUrl`), or left out / null for no 2FA.
+   */
+  codeSource?: CredentialCodeSource | null;
+  /**
    * The site's 2FA setup key (base32, any case, spaces allowed) or an otpauth://totp/ link from its QR code (SHA1,
-   * SHA256 or SHA512, 6 to 8 digits, a 15 to 120 s period; defaults SHA-1, 6 digits, 30 s).
+   * SHA256 or SHA512, 6 to 8 digits, a 15 to 120 s period; defaults SHA-1, 6 digits, 30 s). Only with "totp".
    */
   totpSecret?: string;
+  /**
+   * `codeSource` "url" (required then): a public HTTPS endpoint (never a private or internal address) the platform
+   * asks with a signed POST every 5 s while a run waits for a code; the answer has `codeUrlSecret` once.
+   */
+  codeUrl?: string;
+  /** How long a "push" or "url" wait lasts: 5 to 900 seconds, default 300. */
+  codeTimeoutSeconds?: number;
 }
 
 /** A secret: one value. */
@@ -2116,14 +2183,20 @@ export type CredentialCreateParams = PasswordCredentialCreateParams | SecretCred
 /**
  * Changes to a password; what is not sent is kept. A change of `origins` that adds a site, or of `scope`/`shell` that
  * makes an AI-only password readable by shells, needs `password` again in the same call (and `totpSecret`, a new one or
- * null, when it has 2FA).
+ * null, when it has 2FA); so does a change of `codeSource` (removing 2FA included) or `codeUrl`.
  */
 export interface PasswordCredentialUpdateParams {
   origins?: string[];
   username?: string;
   password?: string;
+  /** Where the codes come from; null removes 2FA. Needs `password` again. */
+  codeSource?: CredentialCodeSource | null;
   /** A new 2FA setup key or otpauth://totp/ link; null removes 2FA. */
   totpSecret?: string | null;
+  /** The endpoint asked for codes ("url"). Needs `password` again; the answer has a new `codeUrlSecret`. */
+  codeUrl?: string;
+  /** 5 to 900 seconds. */
+  codeTimeoutSeconds?: number;
   /** null clears it. */
   description?: string | null;
   shell?: boolean;
@@ -2144,6 +2217,9 @@ export interface SecretCredentialUpdateParams {
   scope?: CredentialScope;
   username?: never;
   password?: never;
+  codeSource?: never;
+  codeUrl?: never;
+  codeTimeoutSeconds?: never;
   totpSecret?: never;
 }
 
@@ -2156,7 +2232,8 @@ export type CredentialUpdateParams = PasswordCredentialUpdateParams | SecretCred
  */
 export interface CredentialAuditEntry {
   at: string;
-  action: "create" | "update" | "delete" | "use";
+  /** "code": a pushed 2FA code or sign-in link (`details.kind`), never its value. */
+  action: "create" | "update" | "delete" | "use" | "code";
   type: CredentialType;
   name: string;
   /** Who changed it: "user:<email>", "key:<api key id>", or "support" (Boxline support acting as a user). */
@@ -2169,6 +2246,16 @@ export interface CredentialAuditEntry {
 export interface CredentialAuditParams extends ListParams {
   /** One credential. */
   name?: string;
+}
+
+/** What `credentials.pushCode` sends: a 2FA code (1 to 64 characters, no spaces) or a sign-in link on one of the credential's sites. */
+export type CredentialCodePush = { code: string; link?: never } | { link: string; code?: never };
+
+/** What `credentials.pushCode` returns: the code or link is kept for a wait in progress (used once, at most 10 minutes). */
+export interface CredentialCodeAccepted {
+  accepted: true;
+  kind: "code" | "link";
+  expiresAt: string;
 }
 
 // ---------------------------------------------------------------- extensions

@@ -40,6 +40,14 @@ export const ErrorCode = {
   credentialNotFound: "credential_not_found",
   credentialNotForAi: "credential_not_for_ai",
   credentialNotForShell: "credential_not_for_shell",
+  /** 408 for `boxline-otp` and the type action, an action result's code in a list: no code or link arrived in time. */
+  credentialCodeTimeout: "credential_code_timeout",
+  credentialLinkWrongSite: "credential_link_wrong_site",
+  /** An action result's code: the `login` action could not sign in. */
+  credentialLoginFailed: "credential_login_failed",
+  /** An action result's code: the `login` action ran out of time and its run was canceled. */
+  credentialLoginTimeout: "credential_login_timeout",
+  codeUrlNotAllowed: "code_url_not_allowed",
   machineTooOld: "machine_too_old",
   /**
    * An agent or task run's errorCode (never an HTTP error): the answer did not match the run's output schema after the
@@ -270,6 +278,41 @@ export class CredentialNotAllowedError extends BoxlineError {
   override name = "CredentialNotAllowedError";
 }
 /**
+ * `credential_code_timeout`: a password with `codeSource` "push" or "url" waited `codeTimeoutSeconds` and no fresh code
+ * or sign-in link came (push one with `credentials.pushCode`, or answer your `codeUrl`). Thrown by `session.login`
+ * and `session.typeCredential`; `boxline-otp` exits 1 with it.
+ */
+export class CredentialCodeTimeoutError extends BoxlineError {
+  override name = "CredentialCodeTimeoutError";
+}
+/**
+ * 400 `credential_link_wrong_site`: a sign-in link (pushed, or answered by `codeUrl`) is not on one of the
+ * credential's sites, so it was not used (never opened).
+ */
+export class CredentialLinkWrongSiteError extends BoxlineError {
+  override name = "CredentialLinkWrongSiteError";
+}
+/**
+ * `credential_login_failed`: `session.login` could not sign in (the message says why: the run's last step). `runId` is
+ * the short agent run that tried (`bx.agent.get(runId)` has its steps); null when the API did not say.
+ */
+export class CredentialLoginFailedError extends BoxlineError {
+  override name = "CredentialLoginFailedError";
+  runId: string | null = null;
+}
+/**
+ * `credential_login_timeout`: `session.login` took longer than its limit (15 steps, plus the credential's
+ * `codeTimeoutSeconds` when its codes come from your system), so the run was canceled. A kind of
+ * CredentialLoginFailedError: `runId` is the run, and `bx.agent.get(runId)` shows where it stood.
+ */
+export class CredentialLoginTimeoutError extends CredentialLoginFailedError {
+  override name = "CredentialLoginTimeoutError";
+}
+/** 400 `code_url_not_allowed`: a credential's `codeUrl` is not a public HTTPS address (the webhook address rules). */
+export class CodeUrlNotAllowedError extends BoxlineError {
+  override name = "CodeUrlNotAllowedError";
+}
+/**
  * 409 `machine_too_old`: the session's machine comes from an image older than the API (during a deploy) and cannot take
  * `env` or `credentials`; start a new session.
  */
@@ -376,6 +419,11 @@ const BY_CODE: Record<string, typeof BoxlineError> = {
   [ErrorCode.credentialExists]: CredentialExistsError,
   [ErrorCode.credentialNotForAi]: CredentialNotAllowedError,
   [ErrorCode.credentialNotForShell]: CredentialNotAllowedError,
+  [ErrorCode.credentialCodeTimeout]: CredentialCodeTimeoutError,
+  [ErrorCode.credentialLinkWrongSite]: CredentialLinkWrongSiteError,
+  [ErrorCode.credentialLoginFailed]: CredentialLoginFailedError,
+  [ErrorCode.credentialLoginTimeout]: CredentialLoginTimeoutError,
+  [ErrorCode.codeUrlNotAllowed]: CodeUrlNotAllowedError,
   [ErrorCode.machineTooOld]: MachineTooOldError,
   [ErrorCode.notContinuable]: NotContinuableError,
   [ErrorCode.tooManyMessages]: TooManyMessagesError,
