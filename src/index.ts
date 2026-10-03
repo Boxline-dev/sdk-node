@@ -67,6 +67,7 @@ export {
   RunNotLiveError,
   SessionNotRunningError,
   type WebhookSignatureFailure,
+  type SpendLimitKind,
   AuthenticationError,
   NotFoundError,
   BoxlineConnectionError,

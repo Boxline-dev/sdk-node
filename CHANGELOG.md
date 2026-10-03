@@ -2,6 +2,18 @@
 
 All notable changes to `@boxline/sdk`. The SDK follows [semantic versioning](https://semver.org).
 
+## 1.4.0 (unreleased)
+
+### Added
+
+- **Spending limits and credit in the types.** A session's `endReason` can be `"spend_limit"` (the organization or the
+  project reached the monthly spending limit its owners set) or `"out_of_credit"`; a run's `errorCode` can be
+  `"out_of_credit"`; `WebhookUsageLimitData.kind` can be `"spend_limit"`, `"project_spend_limit"` or `"credit"`. Calls
+  refused for these fail with 402 (`spend_limit`, `out_of_credit`), like the model spend cap.
+
+- **Which limit refused a 402.** `BoxlineError.details` holds the error body's `error.details` (null without):
+  a 402 `spend_limit` or `out_of_credit` has `details.limit`, `"organization"`, `"project"`, `"plan"` or `"credit"` (type `SpendLimitKind`).
+
 ## 1.3.0 (2026-10-03)
 
 ### Added

@@ -101,6 +101,8 @@ export interface ErrorDetails {
   headers?: Headers;
   /** The parsed error body, when there was one. */
   body?: unknown;
+  /** `error.details` of the body: machine-readable facts about the error, when the API sends them. */
+  details?: Record<string, unknown> | null;
   cause?: unknown;
 }
 
@@ -121,6 +123,11 @@ export class BoxlineError extends Error {
   /** Response headers (RateLimit-*, Retry-After, …); undefined when no response came back. */
   readonly headers?: Headers;
   readonly body?: unknown;
+  /**
+   * Machine-readable facts the API sent with the error (`error.details`), or null. A 402 `spend_limit` or `out_of_credit`
+   * has `details.limit` (SpendLimitKind): which limit refused the call.
+   */
+  readonly details: Record<string, unknown> | null;
 
   constructor(status: number, code: string, message: string, details: ErrorDetails = {}) {
     super(message, details.cause === undefined ? undefined : { cause: details.cause });
@@ -131,6 +138,7 @@ export class BoxlineError extends Error {
     this.clientRequestId = details.clientRequestId ?? null;
     this.headers = details.headers;
     this.body = details.body;
+    this.details = details.details ?? null;
   }
 
   /** Whether trying the same call again later can succeed (rate limits, server errors, network trouble). */
@@ -153,6 +161,12 @@ export class RateLimitError extends BoxlineError {
     this.retryAfter = retryAfterSeconds(details.headers);
   }
 }
+/**
+ * Which limit refused a 402 `spend_limit` or `out_of_credit` (`error.details.limit`): the organization's monthly spending
+ * limit, the project's, a plan allowance (the model spend cap, managed proxy data), or no credit left.
+ */
+export type SpendLimitKind = "organization" | "project" | "plan" | "credit";
+
 /** 402 `feature_not_in_plan`: the project's plan does not include this. */
 export class FeatureNotInPlanError extends BoxlineError {
   override name = "FeatureNotInPlanError";
@@ -454,16 +468,18 @@ export async function errorFromResponse(res: Response, method: string, path: str
   let code = "http_error";
   let message = `${method} ${path.split("?")[0]} failed with ${res.status}`;
   let requestId: string | null = res.headers.get("x-request-id");
+  let details: Record<string, unknown> | null = null;
   try {
     const text = await res.text();
     body = text ? JSON.parse(text) : undefined;
-    const err = (body as { error?: { code?: unknown; message?: unknown; requestId?: unknown } } | undefined)?.error;
+    const err = (body as { error?: { code?: unknown; message?: unknown; requestId?: unknown; details?: unknown } } | undefined)?.error;
     if (typeof err?.code === "string") code = err.code;
     if (typeof err?.message === "string") message = err.message;
     if (typeof err?.requestId === "string") requestId = err.requestId;
+    if (err?.details && typeof err.details === "object" && !Array.isArray(err.details)) details = err.details as Record<string, unknown>;
   } catch {
     /* not JSON (a proxy's error page), or the body could not be read: keep the generic message */
   }
   const clientRequestId = res.headers.get("x-client-request-id") ?? sentClientId ?? null;
-  return makeError(res.status, code, message, { requestId, clientRequestId, headers: res.headers, body });
+  return makeError(res.status, code, message, { requestId, clientRequestId, headers: res.headers, body, details });
 }

@@ -341,6 +341,10 @@ export type SessionEndReason =
   | "paused_expired"
   | "machine_lost"
   | "account_recovered"
+  /** The organization or the project reached its monthly spending limit. */
+  | "spend_limit"
+  /** The organization had no credit left (only where the platform enforces credit). */
+  | "out_of_credit"
   | (string & {});
 
 /** "reject" (the default for new sessions): answer consent banners with "Reject all" or "Necessary only" (never accept), else hide them. */
@@ -1242,6 +1246,7 @@ export type AgentRunErrorCode =
   | "output_invalid"
   | "internal"
   | "spend_limit"
+  | "out_of_credit"
   | "captcha_timeout"
   | "handover_timeout"
   | (string & {});
@@ -1959,8 +1964,12 @@ export interface WebhookSchedulePausedData {
 }
 
 export interface WebhookUsageLimitData {
-  kind: "model_spend" | "proxy_gb" | "captcha_solves" | "searches" | "concurrency";
-  /** The plan's limit: USD, GB, a count, or sessions at once. */
+  /**
+   * The plan's limits, or the organization's money: its monthly spending limit (`spend_limit`), the project's own
+   * (`project_spend_limit`), or its credit used up (`credit`).
+   */
+  kind: "model_spend" | "proxy_gb" | "captcha_solves" | "searches" | "concurrency" | "spend_limit" | "project_spend_limit" | "credit";
+  /** The limit: USD (model spend, spending limits; for `credit` the credit used this month), GB, a count, or sessions at once. */
   limit: number;
   used: number;
   /** "2026-09" (a UTC month), or "2026-09-30T14" (a UTC hour) for concurrency. */
