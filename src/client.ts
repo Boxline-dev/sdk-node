@@ -18,15 +18,18 @@ import type {
   ComputerAction,
   ComputerOptions,
   ComputerResult,
-  ContextInfo,
-  LoginDetails,
-  LoginDetailsUpdate,
+  Profile,
+  ProfileUpdateParams,
   MoveShell,
-  Secret,
-  SecretAuditEntry,
-  SecretAuditParams,
-  SecretCreateParams,
-  SecretUpdateParams,
+  Credential,
+  CredentialAuditEntry,
+  CredentialAuditParams,
+  CredentialCreateParams,
+  CredentialUpdateParams,
+  PasswordCredential,
+  PasswordCredentialCreateParams,
+  SecretCredential,
+  SecretCredentialCreateParams,
   CrawlGetParams,
   CrawlJob,
   CrawlPage,
@@ -131,11 +134,11 @@ export class Boxline {
   readonly project: ProjectSettings;
   readonly apiKeys: ApiKeys;
   readonly sessions: Sessions;
-  readonly contexts: Contexts;
+  readonly profiles: Profiles;
   readonly crawl: Crawl;
   readonly agent: Agent;
   readonly tasks: Tasks;
-  readonly secrets: Secrets;
+  readonly credentials: Credentials;
   readonly webhooks: Webhooks;
   readonly extensions: Extensions;
   /** @internal */
@@ -161,11 +164,11 @@ export class Boxline {
     this.project = new ProjectSettings(this);
     this.apiKeys = new ApiKeys(this);
     this.sessions = new Sessions(this);
-    this.contexts = new Contexts(this);
+    this.profiles = new Profiles(this);
     this.crawl = new Crawl(this);
     this.agent = new Agent(this);
     this.tasks = new Tasks(this);
-    this.secrets = new Secrets(this);
+    this.credentials = new Credentials(this);
     this.webhooks = new Webhooks(this);
     this.extensions = new Extensions(this);
   }
@@ -595,96 +598,92 @@ export class SessionFiles {
   }
 }
 
-// ---------------------------------------------------------------- contexts
+// ---------------------------------------------------------------- profiles
 
-/** Saved logins: cookies and local storage to start sessions with (`context: {id, persist: true}` fills one). */
-export class Contexts {
+/** Browser profiles: cookies and local storage to start sessions with (`profile: {id, persist: true}` fills one). */
+export class Profiles {
   constructor(private readonly client: Boxline) {}
   /**
-   * A new saved login: empty, or with `fromSession` holding that working session's current cookies and site storage
+   * A new profile: empty, or with `fromSession` holding that working session's current cookies and site storage
    * (sign in there first, e.g. in its live view). `attach: true` also makes the session save to it from now on (at its
-   * checkpoints and when it ends); a session that already has a saved login refuses that (409 `conflict`). 413
-   * `context_too_large` over 16 MB; PlanLimitError (402) past the plan's `maxContexts` or `maxContextBytes`.
+   * checkpoints and when it ends); a session that already has a profile refuses that (409 `conflict`). 413
+   * `profile_too_large` over 16 MB; PlanLimitError (402) past the plan's `maxProfiles` or `maxProfileBytes`.
    */
-  create(params: { name?: string; fromSession?: string; attach?: boolean } = {}, options?: RequestOptions): Promise<ContextInfo> {
-    return this.client.request<ContextInfo>("POST", "/v1/contexts", params, options);
+  create(params: { name?: string; fromSession?: string; attach?: boolean } = {}, options?: RequestOptions): Promise<Profile> {
+    return this.client.request<Profile>("POST", "/v1/profiles", params, options);
   }
-  get(id: string, options?: RequestOptions): Promise<ContextInfo> {
-    return this.client.request<ContextInfo>("GET", `/v1/contexts/${encodeURIComponent(id)}`, undefined, options);
+  get(id: string, options?: RequestOptions): Promise<Profile> {
+    return this.client.request<Profile>("GET", `/v1/profiles/${encodeURIComponent(id)}`, undefined, options);
   }
   /** Newest first; the first page's `total` counts them all. */
-  list(params: ListParams = {}, options?: RequestOptions): PagePromise<ContextInfo, Page<ContextInfo> & { total: number }> {
-    return this.client.list<ContextInfo, { total: number }>("/v1/contexts", { ...params }, (c) => c, options);
+  list(params: ListParams = {}, options?: RequestOptions): PagePromise<Profile, Page<Profile> & { total: number }> {
+    return this.client.list<Profile, { total: number }>("/v1/profiles", { ...params }, (c) => c, options);
   }
-  rename(id: string, name: string, options?: RequestOptions): Promise<ContextInfo> {
-    return this.client.request<ContextInfo>("PATCH", `/v1/contexts/${encodeURIComponent(id)}`, { name }, options);
+  /**
+   * Changes the name and/or the password credential the profile signs in with: `credential: "SHOP"` links a password
+   * credential (see `credentials`), so sessions with this profile, and agent runs, task runs and steps in them, get it
+   * as if it were listed in their `credentials` and the AI can sign in again when the cookies have expired; `null`
+   * unlinks it. NotFoundError (404 `credential_not_found`) for a name the project does not have, a 400 BoxlineError
+   * for a secret (only passwords sign in), FeatureNotInPlanError (402) without the plan's `loginDetails`.
+   */
+  update(id: string, changes: ProfileUpdateParams, options?: RequestOptions): Promise<Profile> {
+    return this.client.request<Profile>("PATCH", `/v1/profiles/${encodeURIComponent(id)}`, changes, options);
   }
   delete(id: string, options?: RequestOptions): Promise<void> {
-    return this.client.request<void>("DELETE", `/v1/contexts/${encodeURIComponent(id)}`, undefined, options);
-  }
-  /**
-   * Keeps sign-in details on the saved login (plan feature `loginDetails`), replacing earlier ones: the site, user name,
-   * password and optionally the 2FA setup key, sealed like secrets. Returns the context, whose `login` shows
-   * `{origin, username, hasPassword, hasTotp}`, never the password or the 2FA secret.
-   */
-  setLogin(id: string, details: LoginDetails, options?: RequestOptions): Promise<ContextInfo> {
-    return this.client.request<ContextInfo>("PUT", `/v1/contexts/${encodeURIComponent(id)}/login`, details, options);
-  }
-  /**
-   * Changes some of the login details and keeps the rest (setLogin replaces them all); `totpSecret: null` removes 2FA.
-   * A password never moves to another site on its own: a new `origin` needs `password` in the same call, and
-   * `totpSecret` (a new one or null) when the login has 2FA (400 otherwise). A BoxlineError with code `conflict` (409)
-   * when the login changed meanwhile: send it again.
-   */
-  updateLogin(id: string, changes: LoginDetailsUpdate, options?: RequestOptions): Promise<ContextInfo> {
-    return this.client.request<ContextInfo>("PATCH", `/v1/contexts/${encodeURIComponent(id)}/login`, changes, options);
-  }
-  /** Removes the login details (the saved cookies and storage stay). */
-  deleteLogin(id: string, options?: RequestOptions): Promise<void> {
-    return this.client.request<void>("DELETE", `/v1/contexts/${encodeURIComponent(id)}/login`, undefined, options);
+    return this.client.request<void>("DELETE", `/v1/profiles/${encodeURIComponent(id)}`, undefined, options);
   }
 }
 
-// ---------------------------------------------------------------- secrets
+// ---------------------------------------------------------------- credentials
 
-const secretPath = (name: string) => `/v1/secrets/${encodeURIComponent(name)}`;
+const credentialPath = (name: string) => `/v1/credentials/${encodeURIComponent(name)}`;
 
 /**
- * Project secrets: write-only values the AI uses as %NAME% placeholders (`secrets` on agent runs, steps and scripts) and
- * shells get as environment variables (`secrets` on sessions.create and exec), depending on each secret's `scope`. The
- * value is never returned, logged or shown; every change and use is audited.
+ * Credentials: write-only website passwords (with an optional 2FA key) and secrets. The AI uses them as placeholders
+ * (`%NAME%`, `%SHOP.password%`) with `credentials` on agent runs, steps, scripts, tasks and `Session.typeCredential`;
+ * shells get them as environment variables (`credentials` on sessions.create and exec), depending on each
+ * credential's `scope`. A value is never returned, logged or shown; every change and use is audited.
  */
-export class Secrets {
+export class Credentials {
   constructor(private readonly client: Boxline) {}
-  /** The project's secrets, in name order, without their values. */
-  list(params: ListParams = {}, options?: RequestOptions): PagePromise<Secret> {
-    return this.client.list<Secret>("/v1/secrets", { ...params }, (s) => s, options);
+  /** The project's credentials, in name order, without their values. */
+  list(params: ListParams = {}, options?: RequestOptions): PagePromise<Credential> {
+    return this.client.list<Credential>("/v1/credentials", { ...params }, (c) => c, options);
   }
   /**
-   * Stores a secret, sealed; the answer never has the value. SecretExistsError for a name the project has (change it
-   * with update), PlanLimitError beyond the plan's `maxSecrets`. Not retried by the SDK (the API takes no
-   * Idempotency-Key here): a retry after a lost answer may meet SecretExistsError.
+   * Stores a credential, sealed; the answer never has a value. `type: "password"` takes `origins`, `username`,
+   * `password` and optionally `totpSecret` (needs the plan's `loginDetails`: FeatureNotInPlanError); `type: "secret"`
+   * takes `value`. CredentialExistsError for a name the project has (change it with update), PlanLimitError beyond the
+   * plan's `maxCredentials`. Not retried by the SDK (the API takes no Idempotency-Key here): a retry after a lost
+   * answer may meet CredentialExistsError.
    */
-  create(params: SecretCreateParams, options?: RequestOptions): Promise<Secret> {
-    return this.client.request<Secret>("POST", "/v1/secrets", params, options);
+  create(params: PasswordCredentialCreateParams, options?: RequestOptions): Promise<PasswordCredential>;
+  create(params: SecretCredentialCreateParams, options?: RequestOptions): Promise<SecretCredential>;
+  create(params: CredentialCreateParams, options?: RequestOptions): Promise<Credential>;
+  create(params: CredentialCreateParams, options?: RequestOptions): Promise<Credential> {
+    return this.client.request<Credential>("POST", "/v1/credentials", params, options);
   }
-  get(name: string, options?: RequestOptions): Promise<Secret> {
-    return this.client.request<Secret>("GET", secretPath(name), undefined, options);
+  get(name: string, options?: RequestOptions): Promise<Credential> {
+    return this.client.request<Credential>("GET", credentialPath(name), undefined, options);
   }
   /**
-   * Changes the fields you send. A running agent run keeps the value it started with; a session that exports the secret
-   * gets the new value on its next machine (move, resume, recovery).
+   * Changes the fields you send (the type cannot change: delete it and create it again). A new site, or a `scope`
+   * or `shell` that makes an AI-only credential readable by shells, needs the sensitive values again in the same call
+   * (a secret's `value`; a password's `password`, and `totpSecret` when it has 2FA), else a 400 `invalid_request`; a
+   * 409 `conflict` when the sites, scope or `shell` changed meanwhile (send it again). A running
+   * agent run keeps the values it started with; a session that exports the credential gets the new ones on its next
+   * machine (move, resume, recovery).
    */
-  update(name: string, patch: SecretUpdateParams, options?: RequestOptions): Promise<Secret> {
-    return this.client.request<Secret>("PATCH", secretPath(name), patch, options);
+  update(name: string, patch: CredentialUpdateParams, options?: RequestOptions): Promise<Credential> {
+    return this.client.request<Credential>("PATCH", credentialPath(name), patch, options);
   }
-  /** Deletes it; sessions that exported it no longer get it on their next machine. */
+  /** Deletes it; profiles that link it are unlinked, and sessions that exported it no longer get it on their next machine. */
   delete(name: string, options?: RequestOptions): Promise<void> {
-    return this.client.request<void>("DELETE", secretPath(name), undefined, options);
+    return this.client.request<void>("DELETE", credentialPath(name), undefined, options);
   }
-  /** Changes to secrets and saved login details, and each use (once per session, command, run or script), newest first. */
-  audit(params: SecretAuditParams = {}, options?: RequestOptions): PagePromise<SecretAuditEntry> {
-    return this.client.list<SecretAuditEntry>("/v1/secrets/audit", { ...params }, (e) => e, options);
+  /** Changes to credentials and each use (once per session, command, run, script, task run, typed field or 2FA code), newest first. */
+  audit(params: CredentialAuditParams = {}, options?: RequestOptions): PagePromise<CredentialAuditEntry> {
+    return this.client.list<CredentialAuditEntry>("/v1/credentials/audit", { ...params }, (e) => e, options);
   }
 }
 
@@ -963,8 +962,8 @@ export class Agent {
   }
   /**
    * Continues a run that stopped at one of its limits (errorCode max_steps, max_cost, too_many_errors or no_progress)
-   * while its `continuable` is set: a new run in the same session, with the same model, mode, output schema, secrets
-   * and saved login, and a compact record of what the previous run did. Returns the new run (`continuedFrom` links
+   * while its `continuable` is set: a new run in the same session, with the same model, mode, output schema, credentials
+   * and profile, and a compact record of what the previous run did. Returns the new run (`continuedFrom` links
    * back); wait for it with `wait(run.id)` or `stream(run.id)` like any run. A run that had `variables` needs them again
    * (MissingVariablesError otherwise). NotContinuableError: it did not stop at a limit, was continued already, or its
    * window passed. An Idempotency-Key is sent, so a retry never starts a second run.

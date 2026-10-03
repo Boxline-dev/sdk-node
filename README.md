@@ -24,7 +24,7 @@ instead of an API key, on the platform's own sites.
 - [An agent run with variables](#an-agent-run-with-variables)
 - [Limits, Continue and messages](#limits-continue-and-messages)
 - [Tasks and structured output](#tasks-and-structured-output)
-- [Secrets and saved login details](#secrets-and-saved-login-details)
+- [Credentials and browser profiles](#credentials-and-browser-profiles)
 - [A script with useModel](#a-script-with-usemodel)
 - [CAPTCHAs](#captchas)
 - [Browser settings and extensions](#browser-settings-and-extensions)
@@ -206,7 +206,7 @@ await bx.agent.sendMessage(run.id, "Also open page C and include its heading in 
 
 ## Tasks and structured output
 
-A task is a saved agent run: an instruction with `%name%` variables, an output schema, browser settings, a saved login,
+A task is a saved agent run: an instruction with `%name%` variables, an output schema, browser settings, a profile,
 a model and, if you like, a schedule. Run it by hand or on its schedule; every run is an agent run.
 
 ```ts
@@ -241,45 +241,66 @@ await bx.tasks.update(task.id, { schedule: { enabled: true } });  // null remove
 - **Variables**: plain ones are written into the instruction (and kept with the run); `{ name, secret: true, origins }`
   is never stored, must come with every run, and is typed without the model seeing it. A task with a secret variable
   cannot have a schedule. A run missing a value throws `MissingVariablesError`.
+- **Credentials**: `credentials: ["SHOP"]` on `tasks.create` gives every run the saved credentials' placeholders (see
+  [Credentials and browser profiles](#credentials-and-browser-profiles)); a scheduled task may use them, and the task
+  keeps the names only.
 - **Schedules**: five-field cron (at most every 5 minutes) read in `timezone`. A scheduled run is `queued` until it
   starts; a time that comes while a run is still going is `skipped`, and times the platform was down for are `missed`
   (`reason`, `missedCount`). The plan limits tasks and schedules switched on (`PlanLimitError`).
 - `waitForRun` takes the run from `run()` or `(taskId, taskRunId)`, with `{pollMs, timeoutMs}`; there is no GET for
   one task run, so it watches the task's unfinished runs.
 
-## Secrets and saved login details
+## Credentials and browser profiles
 
-Project secrets are write-only: the value is sealed when stored and never returned or shown. Each secret's `scope` says
-where it may be used: `"agent"` (the default: only the AI, as `%NAME%`), `"shell"` (only as `$NAME` in shells) or `"all"`.
+Credentials are write-only: the value is sealed when stored and never returned or shown. There are two types, a website
+**password** (sites, user name, password and an optional 2FA key) and a **secret** (one value, such as an API token).
+The name is the handle: the AI's placeholder (`%GITHUB_TOKEN%`, `%SHOP.password%`) and the shell variable
+(`$GITHUB_TOKEN`, `$SHOP_PASSWORD`). Each credential's `scope` says where it may be used: `"agent"` (the default: only
+the AI), `"shell"` (only as variables in shells) or `"all"`.
 
 ```ts
-await bx.secrets.create({ name: "GITHUB_TOKEN", value: process.env.GITHUB_TOKEN!, scope: "shell" });
-await bx.secrets.create({ name: "SITE_PASSWORD", value: process.env.SITE_PASSWORD!, origins: ["https://example.com"] });
+await bx.credentials.create({ name: "GITHUB_TOKEN", type: "secret", value: process.env.GITHUB_TOKEN!, scope: "shell" });
+const shop = await bx.credentials.create({
+  name: "SHOP",
+  type: "password",
+  origins: ["https://shop.example.com"],          // the only site the AI may type it on
+  username: "ops@example.com",
+  password: process.env.SHOP_PASSWORD!,
+  totpSecret: process.env.SHOP_2FA_KEY,           // optional: %SHOP.otp% is the current code
+});
+console.log(shop.type, shop.username, shop.hasTotp); // narrowed to PasswordCredential; no value anywhere
 
-// In a shell: exported as $GITHUB_TOKEN, and shown as %GITHUB_TOKEN% wherever it appears in the output.
-const s = await bx.sessions.create({ shell: true, env: { REGION: "eu" }, secrets: ["GITHUB_TOKEN"] });
+// In a shell: $GITHUB_TOKEN, shown as %GITHUB_TOKEN% wherever it appears in the output.
+const s = await bx.sessions.create({ shell: true, env: { REGION: "eu" }, credentials: ["GITHUB_TOKEN"] });
 await s.exec("gh repo list --limit 3");
-await s.exec("./deploy.sh", { secrets: ["DEPLOY_KEY"] });                 // this one command only
+await s.exec("./deploy.sh", { credentials: ["DEPLOY_KEY"] });             // this one command only
 
-// For the AI: typed as %SITE_PASSWORD% only on its sites, never shown to the model.
-await s.step("type %SITE_PASSWORD% into the password field", { secrets: ["SITE_PASSWORD"] });
-await bx.agent.run({ task: "Sign in to https://example.com with %SITE_PASSWORD%", secrets: ["SITE_PASSWORD"] });
+// For the AI: typed only on the credential's sites, never shown to the model.
+await s.step("sign in with %SHOP.username% and %SHOP.password%", { credentials: ["SHOP"] });
+await bx.agent.run({ task: "Sign in to https://shop.example.com with %SHOP.username% and %SHOP.password%", credentials: ["SHOP"] });
+// Or type one field yourself without seeing it (the field's own frame must be on one of the credential's sites):
+await s.typeCredential("SHOP", { field: "password", selector: "#password" });
 
-// A saved login's details with 2FA: %login.username%, %login.password% and %login.otp% in sessions started with it.
-await bx.contexts.setLogin(context.id, { origin: "https://example.com", username: "ada@example.com", password, totpSecret });
+// A profile keeps cookies; link a password and the AI can sign in again when they expire.
+await bx.profiles.update(profile.id, { credential: "SHOP" });
 
-for await (const e of bx.secrets.audit({ name: "GITHUB_TOKEN" })) console.log(e.at, e.action, e.actor, e.usedBy?.type);
+for await (const e of bx.credentials.audit({ name: "SHOP" })) console.log(e.at, e.action, e.actor, e.usedBy?.type);
 ```
 
-- **Exported secrets can be read by anything that runs in the shell**, including an agent's commands that a web page
-  tries to steer. Export only what you accept that for; keep passwords at scope `"agent"` with `origins`. Hiding
-  values in output is a guard against accidents, not a boundary.
-- `runScript(code, { secrets, login: true })` lets the script's `step()` calls use secrets and the saved login's
-  details (the values never enter the machine). In a session with Chrome extensions, steps and scripts with secrets
-  need `allowWithExtensions: true`, as agent runs with variables do.
-- Errors: `SecretExistsError` (use `update`), `SecretNotAllowedError` (the scope does not allow that use),
-  `TooManySecretValuesError` (the session hides as many values as it can: start a new one), `MachineTooOldError`
-  (during a deploy), `PlanLimitError` (beyond the plan's `maxSecrets`).
+- **Exported credentials can be read by anything that runs in the shell**, including an agent's commands that a web
+  page tries to steer. Export only what you accept that for; keep website passwords at scope `"agent"` with `origins`.
+  Hiding values in output is a guard against accidents, not a boundary. A 2FA key never enters the machine:
+  `boxline-otp SHOP` in the shell asks the platform for the current code.
+- `credentials.update` changes the fields you send; a new site needs the sensitive values again in the same call.
+- `runScript(code, { credentials })` lets the script's `step()` calls use credentials (the values never enter the
+  machine). In a session with Chrome extensions, steps, scripts and the `type` action with credentials need
+  `allowWithExtensions: true`, as agent runs with variables do.
+- Errors: `CredentialExistsError` (use `update`), `CredentialNotAllowedError` (the scope does not allow that use),
+  `NotFoundError` (`credential_not_found`), `TooManyCredentialValuesError` (the session hides as many values as it can:
+  start a new one), `FeatureNotInPlanError` (a password needs the plan's `loginDetails`), `MachineTooOldError` (during
+  a deploy), `PlanLimitError` (beyond the plan's `maxCredentials`).
+- The `credential.changed` webhook event says a credential was created, changed (or linked to a profile) or deleted,
+  never a value.
 
 ## A script with useModel
 
@@ -399,8 +420,8 @@ for await (const e of session.events({ types: ["console", "error"] })) console.l
 for await (const p of page.iterPages()) console.log(p.data.length);
 ```
 
-Lists: `sessions.list`, `sessions.events`, `sessions.pages`, `contexts.list`, `apiKeys.list`, `agent.list`,
-`crawl.list`, `extensions.list`, `tasks.list`, `tasks.runs`, `secrets.list`, `secrets.audit`, and a crawl's pages (`crawl.get(id, {after})`, or
+Lists: `sessions.list`, `sessions.events`, `sessions.pages`, `profiles.list`, `apiKeys.list`, `agent.list`,
+`crawl.list`, `extensions.list`, `tasks.list`, `tasks.runs`, `credentials.list`, `credentials.audit`, and a crawl's pages (`crawl.get(id, {after})`, or
 `for await (const p of bx.crawl.pages(id))`).
 
 ## Errors, retries and time limits
@@ -413,13 +434,13 @@ Lists: `sessions.list`, `sessions.events`, `sessions.pages`, `contexts.list`, `a
   `OutOfViewportError`, `WebhookUrlNotAllowedError`, `WebhooksUnavailableError`, `WebhookDisabledError`,
   `PayloadExpiredError`, `WebhookSignatureError` (from verifyWebhook), `VariablesWithExtensionsError`,
   `InvalidExtensionError`, `PayloadTooLargeError`, `LimitReachedError`, `ExtensionDeniedError`, `CrossSiteRequestError`,
-  `MissingVariablesError`, `PlanLimitError`, `SecretExistsError`, `SecretNotAllowedError`, `TooManySecretValuesError`,
+  `MissingVariablesError`, `PlanLimitError`, `CredentialExistsError`, `CredentialNotAllowedError`, `TooManyCredentialValuesError`,
   `MachineTooOldError`, `NotContinuableError`, `TooManyMessagesError`, `SessionNotRunningError`, `AuthenticationError`,
   `NotFoundError`, and
   `BoxlineConnectionError` /
   `BoxlineTimeoutError` when no answer came back. `ErrorCode` has the codes.
 - **Retries.** GETs, and the calls that create or start something (sessions, bulk, agent runs, continued runs, messages
-  to runs, crawls, API keys, contexts, extension uploads, tasks, task runs), are retried after a network error, a time-out, 429 and 5xx: 2 retries by default, exponential backoff
+  to runs, crawls, API keys, profiles, extension uploads, tasks, task runs), are retried after a network error, a time-out, 429 and 5xx: 2 retries by default, exponential backoff
   from 0.5 s to 8 s with jitter, or what `Retry-After` / `RateLimit-Reset` say (up to 60 s; longer waits go to you as a
   `RateLimitError`). Other POSTs (exec, actions, fetch…) are never retried: they could run twice.
 - **Idempotency keys.** The SDK sends a new `Idempotency-Key` with every create, and the same one on its retries, so a
@@ -448,12 +469,12 @@ same methods without it (`session.pause()`).
 | Account | `me`, `hasFeature`, `auth.signup`, `auth.login`, `auth.logout`, `project.trajectories`, `project.setTrajectories`, `project.settings`, `project.setSettings`, `apiKeys.list`, `apiKeys.create`, `apiKeys.revoke` |
 | Webhooks | `webhooks.create`, `list`, `get`, `update`, `delete`, `rotateSecret`, `test`, `deliveries`, `retryDelivery`; `verifyWebhook` (no request) |
 | Sessions | `sessions.create`, `get`, `list`, `update`, `release`, `pause`, `resume`, `move`, `extend`, `rotateProxy`, `rotateUrls`, `live`, `bulk` |
-| Browser | `sessions.actions`, `sessions.computer`; on a session: `goto`, `click`, `hover`, `fill`, `type`, `press`, `scroll`, `wait`, `select`, `elements`, `evaluate`, `content`, `screenshot`, `cursor`, `upload`, `tabs`, `newTab`, `switchTab`, `closeTab`, `back`, `forward`, `reload`, `step`, `extract`, `exportCookies`, `computer`, `mouse.move`/`moveBy`/`click`/`down`/`up`/`drag`, `keyboard.key`/`type`/`press` |
+| Browser | `sessions.actions`, `sessions.computer`; on a session: `goto`, `click`, `hover`, `fill`, `type`, `typeCredential`, `press`, `scroll`, `wait`, `select`, `elements`, `evaluate`, `content`, `screenshot`, `cursor`, `upload`, `tabs`, `newTab`, `switchTab`, `closeTab`, `back`, `forward`, `reload`, `step`, `extract`, `exportCookies`, `computer`, `mouse.move`/`moveBy`/`click`/`down`/`up`/`drag`, `keyboard.key`/`type`/`press` |
 | Shell and scripts | `sessions.exec`, `execStream`, `runScript`, `restartShell` |
 | Files | `sessions.files.list`, `read`, `readText`, `write`, `delete`, `waitFor` |
 | Logs | `sessions.events`, `streamEvents`, `pages`, `recording`, `recordingFrame`; on a session: `waitForHuman`, `onCaptcha` |
-| Saved logins | `contexts.create`, `get`, `list`, `rename`, `delete`, `setLogin`, `deleteLogin` |
-| Secrets | `secrets.create`, `list`, `get`, `update`, `delete`, `audit` |
+| Browser profiles | `profiles.create`, `get`, `list`, `update`, `delete` |
+| Credentials | `credentials.create`, `list`, `get`, `update`, `delete`, `audit`; on a session: `typeCredential` |
 | Extensions | `extensions.upload`, `list`, `get`, `delete` |
 | Web | `fetch`, `screenshot`, `pdf`, `extract`, `search`, `crawl.start`, `get`, `list`, `cancel`, `pages`, `wait` |
 | Agent | `agent.models`, `run`, `get`, `list`, `takeover`, `handBack`, `cancel`, `continueRun`, `sendMessage`, `stream`, `wait` |
@@ -479,7 +500,7 @@ reach, so run them with `BOXLINE_API_URL=http://localhost:8080`; `search.ts` and
 | `webhooks.ts` | endpoints, deliveries and their history, re-sending, rotating the secret, a test event |
 | `agent-variables.ts` | an agent run with `%email%` / `%password%` limited to one site |
 | `tasks.ts` | a task with an output schema on a demo shop: run with a variable, waited for, its history, changed, deleted; an agent run with `output` |
-| `secrets.ts` | a secret exported into a shell (its length checked, its value hidden in output), changed, audited, deleted; login details on a saved login |
+| `credentials.ts` | a secret exported into a shell (its length checked, its value hidden in output), changed, audited, deleted; a password with 2FA linked to a profile |
 | `script-use-model.ts` | `useModel`, `step()` and `extract()` in a script |
 | `captcha.ts` | noticing a CAPTCHA and handing it to a person |
 | `block-ads.ts` | a session that blocks ads and trackers, and its `blockedRequests` count |

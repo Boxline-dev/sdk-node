@@ -9,7 +9,7 @@ export interface RequestOptions {
   maxRetries?: number;
   /**
    * Idempotency-Key for the calls that create or start something (sessions, bulk, agent runs, crawls, API keys,
-   * contexts, extension uploads). The SDK makes one per call by itself; pass your own to make a retry of your own safe too, e.g. a job id.
+   * profiles, extension uploads). The SDK makes one per call by itself; pass your own to make a retry of your own safe too, e.g. a job id.
    */
   idempotencyKey?: string;
   /**
@@ -45,7 +45,7 @@ export const IDEMPOTENT_POSTS = new Set([
   "/v1/agent/runs/:id/messages",
   "/v1/crawl",
   "/v1/api-keys",
-  "/v1/contexts",
+  "/v1/profiles",
   "/v1/extensions",
   "/v1/tasks",
   "/v1/tasks/:id/runs",

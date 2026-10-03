@@ -52,7 +52,7 @@ export interface LoginResponse {
 export type PlanFeature =
   | "shell"
   | "pauseResume"
-  | "contexts"
+  | "profiles"
   | "recording"
   | "realisticBrowser"
   | "residentialProxy"
@@ -94,12 +94,12 @@ export interface Plan {
   tasks?: number | null;
   /** Tasks with a schedule switched on; 0 = no schedules, null = no limit. */
   schedules?: number | null;
-  /** Project secrets a project may keep. */
-  maxSecrets?: number;
-  /** Saved logins (contexts) a project may keep; null = no limit. */
-  maxContexts?: number | null;
-  /** Bytes a project's saved logins may hold together; null = no limit. */
-  maxContextBytes?: number | null;
+  /** Credentials (passwords and secrets together) a project may keep. */
+  maxCredentials?: number;
+  /** Browser profiles a project may keep; null = no limit. */
+  maxProfiles?: number | null;
+  /** Bytes a project's profiles may hold together; null = no limit. */
+  maxProfileBytes?: number | null;
   features: Record<PlanFeature, boolean>;
   public?: boolean;
 }
@@ -294,9 +294,9 @@ export interface SessionData {
   /** A CAPTCHA waiting for a person, or null. */
   attention: CaptchaAttention | null;
   workspacePath: string;
-  contextId: string | null;
-  /** Whether the session saves its sign-ins back to `contextId` when it ends. */
-  contextPersist?: boolean;
+  profileId: string | null;
+  /** Whether the session saves its sign-ins back to `profileId` when it ends. */
+  profilePersist?: boolean;
   userMetadata: Record<string, unknown>;
   moves: number;
   /** When the last automatic checkpoint was taken (null before the first one). */
@@ -321,8 +321,8 @@ export interface SessionData {
   extensions: string[];
   /** The names of the session's env variables (values are never returned). */
   env?: string[];
-  /** The names of the project secrets its shell exports. */
-  secrets?: string[];
+  /** The names of the credentials its shell exports (a credential its profile links is listed too when it went into the shell). */
+  credentials?: string[];
   usage: { seconds: number; costUsd: number };
 }
 
@@ -364,8 +364,8 @@ export interface CreateSessionParams {
   keepAlive?: boolean;
   viewport?: Viewport;
   userMetadata?: Record<string, unknown>;
-  /** Start from a saved login; `persist: true` saves the browser's logins back into it at the end. */
-  context?: { id: string; persist?: boolean };
+  /** Start from a profile; `persist: true` saves the browser's logins back into it at the end. */
+  profile?: { id: string; persist?: boolean };
   /** Keep replay frames of this session (default true). */
   recordSession?: boolean;
   /**
@@ -399,11 +399,13 @@ export interface CreateSessionParams {
    */
   env?: Record<string, string | number | boolean>;
   /**
-   * Project secrets exported into the shell as `$NAME` (needs shell: true; the secret needs scope "shell" or "all", or
-   * shell: true, else SecretNotAllowedError). Kept in the machine's memory only and hidden in exec, script and terminal
-   * output. Anything that runs in the shell can read them: export only what you accept that for.
+   * Credentials exported into the shell (needs shell: true; the credential needs scope "shell" or "all", or shell:
+   * true, else CredentialNotAllowedError): a secret as `$NAME`, a password as `$NAME_USERNAME` and `$NAME_PASSWORD`
+   * (its 2FA code comes from `boxline-otp NAME`, the key itself never enters the machine). Kept in the machine's
+   * memory only and hidden in exec, script and terminal output. Anything that runs in the shell can read them: export
+   * only what you accept that for.
    */
-  secrets?: string[];
+  credentials?: string[];
 }
 
 export interface UpdateSessionParams {
@@ -464,13 +466,13 @@ export interface MoveTimings {
 
 /**
  * Sessions with a shell, after a move: where the shell continues and which exported variables came along (the
- * session's env and secrets are set again as well). Running processes do not move; the ones that were stopped are listed.
+ * session's env and credentials are set again as well). Running processes do not move; the ones that were stopped are listed.
  */
 export interface MoveShell {
   cwd: string;
   /** Names of the variables the commands exported. */
   exported: string[];
-  /** `command` with secret values hidden, at most 200 characters; `seconds`: how long it had run. */
+  /** `command` with credential values hidden, at most 200 characters; `seconds`: how long it had run. */
   stoppedProcesses: { pid: number; command: string; seconds: number }[];
 }
 
@@ -495,6 +497,12 @@ export type Action =
   | { action: "click"; selector?: string; x?: number; y?: number; button?: MouseButton; count?: 1 | 2 | 3; modifiers?: string[] }
   | { action: "fill"; selector: string; value: string }
   | { action: "type"; text: string; selector?: string; delayMs?: number }
+  /**
+   * Types a credential's value without it passing through you (see Session.typeCredential): `field` is `"username"`,
+   * `"password"` or `"otp"` (the current 2FA code) for a password, and left out for a secret. A credential with sites
+   * (every password) goes only into the field `selector` names, on one of those sites.
+   */
+  | { action: "type"; credential: string; field?: CredentialField; selector?: string; allowWithExtensions?: boolean }
   | { action: "press"; key: string }
   /** A combination held together ("Control+A" or ["Control", "A"]); a string may hold several, separated by spaces. */
   | { action: "key"; keys: string | string[]; holdMs?: number }
@@ -532,9 +540,13 @@ export type Action =
       action: "step";
       instruction: string;
       variables?: Record<string, string>;
-      /** Project secrets usable as %NAME% (scope "agent" or "all"), each on its own sites; never shown in the result. */
-      secrets?: string[];
-      /** Allow `secrets` and saved login details in a session with Chrome extensions (VariablesWithExtensionsError otherwise). */
+      /**
+       * Credentials usable as placeholders (scope "agent" or "all"): `%NAME%` for a secret, `%NAME.username%`,
+       * `%NAME.password%` and `%NAME.otp%` for a password, each on its own sites; never shown in the result. A
+       * credential the session's profile links is offered too.
+       */
+      credentials?: string[];
+      /** Allow `credentials` in a session with Chrome extensions (VariablesWithExtensionsError otherwise). */
       allowWithExtensions?: boolean;
       provider?: AgentProvider;
       model?: string;
@@ -712,14 +724,15 @@ export interface StepOptions {
   /** Text values for %name% placeholders. */
   variables?: Record<string, string>;
   /**
-   * Project secrets usable as %NAME% (scope "agent" or "all"), each only on its own sites and in the shell only with
-   * shell: true. The step's result never shows their values. In a session with a saved login's details,
-   * %login.username%, %login.password% and %login.otp% work too, on that login's site only.
+   * Credentials usable as placeholders (scope "agent" or "all"): `%NAME%` for a secret, `%NAME.username%`,
+   * `%NAME.password%` and `%NAME.otp%` for a password. Each is typed only on its own sites and, in the shell, only
+   * with `shell: true`. The step's result never shows their values. In a session whose profile links a password
+   * credential, that credential is offered too.
    */
-  secrets?: string[];
+  credentials?: string[];
   /**
-   * Allow `secrets` and saved login details in a session with Chrome extensions, which can read every typed value
-   * (secrets: VariablesWithExtensionsError otherwise; login details are not offered). Logs a warning in the session's events.
+   * Allow `credentials` in a session with Chrome extensions, which can read every typed value
+   * (VariablesWithExtensionsError otherwise). Logs a warning in the session's events.
    */
   allowWithExtensions?: boolean;
   provider?: AgentProvider;
@@ -732,8 +745,11 @@ export interface ExecOptions {
   cwd?: string;
   /** Variables for this command only (it may set PATH, HOME and the like for itself). */
   env?: Record<string, string>;
-  /** Project secrets as environment variables for this command only (scope "shell" or "all", or shell: true); hidden in the output. */
-  secrets?: string[];
+  /**
+   * Credentials as environment variables for this command only (scope "shell" or "all", or shell: true): a secret as
+   * `$NAME`, a password as `$NAME_USERNAME` and `$NAME_PASSWORD`, and `boxline-otp NAME` prints its 2FA code. Hidden in the output.
+   */
+  credentials?: string[];
   /** Named persistent shell (default "default"); false runs in a fresh process with no kept state. */
   shell?: string | false;
 }
@@ -769,14 +785,13 @@ export interface RunScriptOptions {
   /** The model step() and extract() use unless a call (or useModel()) picks its own. */
   ai?: { provider?: AgentProvider; model?: string };
   /**
-   * Project secrets the script's step() calls may use as %NAME% (scope "agent" or "all"). The values never enter the
-   * machine: the platform fills them in when the step runs. The grant is for this run only.
+   * Credentials the script's step() calls may use as placeholders (scope "agent" or "all"). The values never enter the
+   * machine: the platform fills them in when the step runs. The grant is for this run only. A credential the
+   * session's profile links is used only when it is listed here.
    */
-  secrets?: string[];
-  /** Let step() use the session's saved login details (%login.username%, %login.password%, %login.otp%). */
-  login?: boolean;
+  credentials?: string[];
   /**
-   * Allow `secrets` and `login` in a session with Chrome extensions, which can read every typed value
+   * Allow `credentials` in a session with Chrome extensions, which can read every typed value
    * (VariablesWithExtensionsError otherwise); a warning goes into the session's events.
    */
   allowWithExtensions?: boolean;
@@ -840,9 +855,9 @@ export interface Recording {
   durationMs: number;
 }
 
-// ---------------------------------------------------------------- contexts
+// ---------------------------------------------------------------- profiles
 
-export interface ContextInfo {
+export interface Profile {
   id: string;
   name: string;
   sizeBytes: number;
@@ -850,46 +865,23 @@ export interface ContextInfo {
   updatedAt: string;
   /** The running session using it. */
   inUseBy: string | null;
-  /** Its login details (contexts.setLogin), never the password or the 2FA secret; null without any. */
-  login?: ContextLogin | null;
-}
-
-/** What a saved login shows of its login details. */
-export interface ContextLogin {
-  origin: string;
-  username: string;
-  hasPassword: boolean;
-  hasTotp: boolean;
-  updatedAt?: string;
-}
-
-/**
- * A saved login's sign-in details (plan feature `loginDetails`). Agent runs, plain-English steps and scripts' step() in
- * a session started with that context get %login.username%, %login.password% and %login.otp% (a TOTP code made when it
- * is typed), filled in only into fields whose frame is on `origin`, never into shell commands, never shown to the model.
- */
-export interface LoginDetails {
-  /** The one site they may be typed on: "https://example.com" or "https://*.example.com" (any subdomain). */
-  origin: string;
-  /** At most 320 characters. */
-  username: string;
-  /** 1 to 1024 characters. */
-  password: string;
   /**
-   * The site's 2FA setup key (base32, any case, spaces allowed) or an otpauth://totp/ link from its QR code (SHA1,
-   * SHA256 or SHA512, 6 to 8 digits, a 15 to 120 s period; defaults SHA-1, 6 digits, 30 s).
+   * The name of the password credential it signs in with (profiles.update with `credential`), or null. Sessions with
+   * the profile, and agent runs, task runs and steps in them, get it as if it were listed in their `credentials`.
    */
-  totpSecret?: string;
+  credential: string | null;
 }
 
-/** contexts.updateLogin: any of the login details; what is not sent is kept. */
-export interface LoginDetailsUpdate {
-  /** A new site: needs `password` too (and `totpSecret` when the login has 2FA), or the call fails with 400. */
-  origin?: string;
-  username?: string;
-  password?: string;
-  /** A new 2FA setup key or otpauth://totp/ link; null removes 2FA. */
-  totpSecret?: string | null;
+/** profiles.update: any of these (at least one). */
+export interface ProfileUpdateParams {
+  /** 1 to 100 characters. */
+  name?: string;
+  /**
+   * Link the password credential this profile signs in with, so the AI can sign in again when its cookies have
+   * expired; null unlinks it. NotFoundError (404 `credential_not_found`) for a name the project does not have, 400 for a secret (only
+   * passwords sign in), FeatureNotInPlanError (402) without `loginDetails`.
+   */
+  credential?: string | null;
 }
 
 // ---------------------------------------------------------------- web
@@ -1154,15 +1146,17 @@ export interface AgentRunParams {
   /** Keep the run's own session after it finishes (until its expiresAt, with keepAlive on). */
   keepSession?: boolean;
   /**
-   * Project secrets as %NAME% placeholders, exactly like `variables`, each with the secret's own `origins` and `shell`
-   * rule (scope "agent" or "all"; SecretNotAllowedError for scope "shell"). An explicit variable with the same name wins.
+   * Credentials as placeholders, exactly like `variables`, each with the credential's own `origins` and `shell` rule
+   * (scope "agent" or "all"; CredentialNotAllowedError for scope "shell"): `%NAME%` for a secret, `%NAME.username%`,
+   * `%NAME.password%` and `%NAME.otp%` for a password. An explicit variable with the same name wins. A password
+   * credential linked to the session's profile is added for you.
    */
-  secrets?: string[];
+  credentials?: string[];
   /**
-   * For the run's own session: a saved login to start with. With login details the run also gets %login.username%,
-   * %login.password% and %login.otp% on the login's site.
+   * For the run's own session: a profile to start with. When it links a password credential (profiles.update), the
+   * run gets that credential as if it were listed in `credentials`.
    */
-  context?: { id: string; persist?: boolean };
+  profile?: { id: string; persist?: boolean };
   /** "anthropic" or "openai"; defaults to the first configured provider. */
   provider?: AgentProvider;
   /** e.g. "claude-opus-5", "claude-sonnet-5", "gpt-6-sol"; defaults to the provider's default model. */
@@ -1390,7 +1384,7 @@ export interface TaskVariable {
 /**
  * The settings of each run's own session, as on sessions.create, checked when saved and again at each run. A custom
  * proxy's password is stored encrypted and never returned. `allowWithExtensions` is needed for a task with secret
- * variables and extensions (VariablesWithExtensionsError otherwise).
+ * variables or credentials and extensions (VariablesWithExtensionsError otherwise).
  */
 export interface TaskBrowser extends BrowserOptions {
   shell?: boolean;
@@ -1444,8 +1438,8 @@ export interface TaskLastRun {
   finishedAt: string | null;
 }
 
-/** A saved login (context) each run's session starts with: its id, or `{id, persist}` (persist: keep what the run changes). */
-export type TaskSavedLogin = string | { id: string; persist?: boolean };
+/** A browser profile each run's session starts with: its id, or `{id, persist}` (persist: keep what the run changes). */
+export type TaskProfile = string | { id: string; persist?: boolean };
 
 export interface TaskCreateParams {
   /** 1–100 characters. */
@@ -1455,14 +1449,14 @@ export interface TaskCreateParams {
   /** Up to 50. */
   variables?: TaskVariable[];
   /**
-   * Project secrets (by name, up to 50) each run gets as %NAME%, as `secrets` on agent runs. They must exist with scope
-   * "agent" or "all"; a scheduled task may use them (secret variables cannot be scheduled).
+   * Credentials (by name, up to 50) each run gets as placeholders, as `credentials` on agent runs. They must exist with
+   * scope "agent" or "all"; a scheduled task may use them (secret variables cannot be scheduled).
    */
-  secrets?: string[];
+  credentials?: string[];
   /** Structured output for every run (see OutputSchema). */
   output?: OutputSchema;
   browser?: TaskBrowser;
-  savedLogin?: TaskSavedLogin;
+  profile?: TaskProfile;
   /** From agent.models() (default: the server's default model). */
   model?: { provider?: AgentProvider; model?: string };
   /** 1–1000 (default 30), or null for no step limit. */
@@ -1481,10 +1475,10 @@ export interface TaskUpdateParams {
   instruction?: string;
   variables?: TaskVariable[];
   /** The whole new list; null or [] removes them. */
-  secrets?: string[] | null;
+  credentials?: string[] | null;
   output?: OutputSchema | null;
   browser?: TaskBrowser | null;
-  savedLogin?: TaskSavedLogin | null;
+  profile?: TaskProfile | null;
   model?: { provider?: AgentProvider; model?: string } | null;
   /** null: no step limit. */
   maxSteps?: number | null;
@@ -1501,11 +1495,11 @@ export interface Task {
   name: string;
   instruction: string;
   variables: TaskVariable[];
-  /** Names of the project secrets its runs get (never values). */
-  secrets: string[];
+  /** Names of the credentials its runs get (never values). */
+  credentials: string[];
   output: OutputSchema | null;
   browser: TaskBrowser | null;
-  savedLogin: { id: string; persist: boolean } | null;
+  profile: { id: string; persist: boolean } | null;
   model: { provider?: AgentProvider; model?: string } | null;
   /** null: no step limit (a task saved without one shows 30). */
   maxSteps: number | null;
@@ -1564,7 +1558,7 @@ export interface TaskRun<T = unknown> {
 export interface TaskRunParams {
   /** Values by name. Secret variables must be given on every run; plain ones fall back to their defaults. */
   variables?: Record<string, string | number | boolean>;
-  /** Work in this session (its own settings apply; the task's `browser` and `savedLogin` do not). */
+  /** Work in this session (its own settings apply; the task's `browser` and `profile` do not). */
   sessionId?: string;
 }
 
@@ -1651,7 +1645,7 @@ export type WebhookEventType =
   | "usage.limit_reached"
   | "api_key.created"
   | "api_key.revoked"
-  | "secret.changed"
+  | "credential.changed"
   | "webhook.changed"
   | "webhook.disabled"
   | "extension.uploaded"
@@ -1962,13 +1956,13 @@ export interface WebhookApiKeyData {
   by: WebhookActor;
 }
 
-export interface WebhookSecretChangedData {
-  /** The secret's name, or for a login the context's id. */
+export interface WebhookCredentialChangedData {
+  /** The credential's name. */
   name: string;
   action: "created" | "updated" | "deleted";
-  kind: "secret" | "login";
+  type: CredentialType;
   by: WebhookActor;
-  /** Field names an update changed ("value", "origins", …). */
+  /** Field names an update changed ("password", "origins", …; "profiles" when it was linked to or unlinked from a profile). */
   changed?: string[];
 }
 
@@ -2017,7 +2011,7 @@ export interface WebhookEventDataMap {
   "usage.limit_reached": WebhookUsageLimitData;
   "api_key.created": WebhookApiKeyData;
   "api_key.revoked": WebhookApiKeyData;
-  "secret.changed": WebhookSecretChangedData;
+  "credential.changed": WebhookCredentialChangedData;
   "webhook.changed": WebhookChangedData;
   "webhook.disabled": WebhookDisabledData;
   "extension.uploaded": WebhookExtensionData;
@@ -2030,73 +2024,150 @@ export type WebhookEventPayload = {
   [K in keyof WebhookEventDataMap]: Omit<WebhookEvent<WebhookEventDataMap[K]>, "type"> & { type: K };
 }[keyof WebhookEventDataMap];
 
-// ---------------------------------------------------------------- secrets
+// ---------------------------------------------------------------- credentials
+
+/** A credential holds a website password (with an optional 2FA key) or a secret (one value). */
+export type CredentialType = "password" | "secret";
 
 /**
- * Where a project secret may be used: "agent" (default): only the AI, as %NAME% in agent runs, plain-English steps and
- * scripts' step(); "shell": only as an environment variable in session shells and commands; "all": both.
+ * Where a credential may be used: "agent" (default): only the AI, as placeholders in agent runs, plain-English steps,
+ * scripts' step() and the type action; "shell": only as environment variables in session shells and commands; "all": both.
  */
-export type SecretScope = "agent" | "shell" | "all";
+export type CredentialScope = "agent" | "shell" | "all";
 
-/** A project secret. Its value is never returned. */
-export interface Secret {
+/** What `Session.typeCredential` types from a password credential: its user name, its password or its current 2FA code. */
+export type CredentialField = "username" | "password" | "otp";
+
+interface CredentialBase {
+  /** Also its placeholder (`%NAME%`, `%NAME.password%`) and its shell variable (`$NAME`, `$NAME_PASSWORD`). */
   name: string;
   description: string | null;
-  /** Sites where the AI may type it (null = any site). */
-  origins: string[] | null;
   /** The AI may use it in bash commands; this also allows exporting it into shells. */
   shell: boolean;
-  scope: SecretScope;
-  /** "••••1a2b": the last 4 characters of values of 24 characters or more; null for shorter values and secrets with origins. */
-  preview: string | null;
+  scope: CredentialScope;
   createdAt: string;
   updatedAt: string;
   lastUsedAt: string | null;
 }
 
-export interface SecretCreateParams {
+/** A website password. Neither the password nor the 2FA key is ever returned. */
+export interface PasswordCredential extends CredentialBase {
+  type: "password";
+  /** The sites where the AI may type it (1 to 20). */
+  origins: string[];
+  username: string;
+  /** It has a 2FA key: `%NAME.otp%` and `boxline-otp NAME` give the current code. */
+  hasTotp: boolean;
+}
+
+/** A secret (an API key, a token). Its value is never returned. */
+export interface SecretCredential extends CredentialBase {
+  type: "secret";
+  /** Sites where the AI may type it (null = any site). */
+  origins: string[] | null;
+  /** "••••1a2b": the last 4 characters of values of 24 characters or more; null for shorter values and secrets with origins. */
+  preview: string | null;
+}
+
+/** A credential without its values: `switch (c.type)` tells the two apart. */
+export type Credential = PasswordCredential | SecretCredential;
+
+interface CredentialCreateBase {
   /**
    * An environment variable name in capitals, [A-Z_][A-Z0-9_]*, at most 64 characters; not one the platform or bash
-   * sets (PATH, HOME, PWD, IFS, …, or starting with BOXLINE_, SANDBOXD_ or BASH_). One per project.
+   * sets (PATH, HOME, PWD, IFS, …, or starting with BOXLINE_, SANDBOXD_ or BASH_). One per project, whatever the type.
    */
   name: string;
-  /** 1 to 8000 characters, no NUL. Sealed when stored and never returned. */
-  value: string;
   /** Up to 500 characters. */
   description?: string;
-  /** Sites where the AI may type it, e.g. ["https://example.com"] (recommended for passwords); 1 to 20. */
-  origins?: string[];
   /** Let the AI use it in bash commands (and so export it into shells). Default false. */
   shell?: boolean;
   /** Default "agent". */
-  scope?: SecretScope;
+  scope?: CredentialScope;
 }
 
-/** Any of these; `description: null` clears it, `origins: null` allows any site. Changes apply to new uses. */
-export interface SecretUpdateParams {
-  value?: string;
+/** A website password; needs the plan's `loginDetails`. */
+export interface PasswordCredentialCreateParams extends CredentialCreateBase {
+  type: "password";
+  /** The sites where the AI may type it, `"https://shop.example.com"` or `"https://*.example.com"` (any subdomain); 1 to 20. */
+  origins: string[];
+  /** 1 to 320 characters. */
+  username: string;
+  /** 1 to 1024 characters. Sealed when stored and never returned. */
+  password: string;
+  /**
+   * The site's 2FA setup key (base32, any case, spaces allowed) or an otpauth://totp/ link from its QR code (SHA1,
+   * SHA256 or SHA512, 6 to 8 digits, a 15 to 120 s period; defaults SHA-1, 6 digits, 30 s).
+   */
+  totpSecret?: string;
+}
+
+/** A secret: one value. */
+export interface SecretCredentialCreateParams extends CredentialCreateBase {
+  type: "secret";
+  /** 1 to 8000 characters, no NUL. Sealed when stored and never returned. */
+  value: string;
+  /** Sites where the AI may type it, e.g. ["https://example.com"] (1 to 20); without, any site. */
+  origins?: string[];
+}
+
+export type CredentialCreateParams = PasswordCredentialCreateParams | SecretCredentialCreateParams;
+
+/**
+ * Changes to a password; what is not sent is kept. A change of `origins` that adds a site, or of `scope`/`shell` that
+ * makes an AI-only password readable by shells, needs `password` again in the same call (and `totpSecret`, a new one or
+ * null, when it has 2FA).
+ */
+export interface PasswordCredentialUpdateParams {
+  origins?: string[];
+  username?: string;
+  password?: string;
+  /** A new 2FA setup key or otpauth://totp/ link; null removes 2FA. */
+  totpSecret?: string | null;
+  /** null clears it. */
   description?: string | null;
-  origins?: string[] | null;
   shell?: boolean;
-  scope?: SecretScope;
+  scope?: CredentialScope;
+  value?: never;
 }
 
-/** One entry of the secrets audit log: a change, or a use (once per session, command, agent run, step session or script). Never values. */
-export interface SecretAuditEntry {
+/**
+ * Changes to a secret; what is not sent is kept. A change of `origins` that adds a site, or null, or of `scope`/`shell`
+ * that makes an AI-only secret readable by shells, needs `value` again.
+ */
+export interface SecretCredentialUpdateParams {
+  value?: string;
+  /** null allows any site. */
+  origins?: string[] | null;
+  description?: string | null;
+  shell?: boolean;
+  scope?: CredentialScope;
+  username?: never;
+  password?: never;
+  totpSecret?: never;
+}
+
+/** What credentials.update takes: the fields of a password or of a secret (the type cannot change). Changes apply to new uses. */
+export type CredentialUpdateParams = PasswordCredentialUpdateParams | SecretCredentialUpdateParams;
+
+/**
+ * One entry of the credentials audit log: a change, or a use (once per session, command, agent run, step session,
+ * script, task run, type action or boxline-otp session). Never values.
+ */
+export interface CredentialAuditEntry {
   at: string;
   action: "create" | "update" | "delete" | "use";
-  /** "login": a saved login's details (`name` is the context id). */
-  kind: "secret" | "login";
+  type: CredentialType;
   name: string;
   /** Who changed it: "user:<email>", "key:<api key id>", or "support" (Boxline support acting as a user). */
   actor: string | null;
-  /** What used it. */
-  usedBy: { type: "session" | "exec" | "agent_run" | "step" | "script" | "task_run"; id: string } | null;
+  /** What used it: `id` is the session, or for `agent_run` the run and for `task_run` the task run. Null for changes. */
+  usedBy: { type: "session" | "exec" | "agent_run" | "step" | "script" | "task_run" | "action" | "otp"; id: string } | null;
   details: Record<string, unknown>;
 }
 
-export interface SecretAuditParams extends ListParams {
-  /** One secret (or a context id, for login details). */
+export interface CredentialAuditParams extends ListParams {
+  /** One credential. */
   name?: string;
 }
 

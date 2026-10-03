@@ -11,6 +11,7 @@ import type {
   ComputerAction,
   ComputerOptions,
   ComputerResult,
+  CredentialField,
   DragTarget,
   ExecExit,
   ExecOptions,
@@ -43,7 +44,12 @@ import type {
 } from "./types.js";
 
 /** HTTP status an action result's code stands for, when one action of a list fails (the call itself answered 200). */
-const ACTION_STATUS: Record<string, number> = { captcha_timeout: 409, model_refused: 422 };
+const ACTION_STATUS: Record<string, number> = {
+  captcha_timeout: 409,
+  model_refused: 422,
+  credential_not_found: 404,
+  feature_not_in_plan: 402,
+};
 
 export interface ClickOptions {
   button?: MouseButton;
@@ -231,8 +237,8 @@ export class Session {
     return r.value as T;
   }
   /**
-   * Runs one plain-English step ("click Sign in", "type %email% into the email field"). `secrets: ["NAME"]` lets it use
-   * project secrets as %NAME%, each on its own sites (see StepOptions).
+   * Runs one plain-English step ("click Sign in", "type %email% into the email field"). `credentials: ["NAME"]` lets it
+   * use credentials as placeholders (`%NAME%`, `%SHOP.password%`), each on its own sites (see StepOptions).
    */
   step(instruction: string, opts: StepOptions = {}, options?: RequestOptions) {
     return this.one<StepResult>({ action: "step", instruction, ...opts }, options);
@@ -262,6 +268,17 @@ export class Session {
   /** Types text with the keyboard (into `selector` if given). */
   type(text: string, opts: { selector?: string; delayMs?: number } = {}, options?: RequestOptions) {
     return this.one<null>({ action: "type", text, ...opts }, options);
+  }
+  /**
+   * Types a credential's value without it passing through you: `field` is `"username"`, `"password"` or `"otp"` (the
+   * current 2FA code, made when it is typed) for a password credential, and left out for a secret. A credential with
+   * sites (every password) goes only into the field `selector` names, whose own frame must be on one of its sites,
+   * checked right before writing; one without sites may be typed where the focus is. The value is never in the reply
+   * or the session's log. Needs scope "agent" or "all" (CredentialNotAllowedError for "shell"); the first use per
+   * session is audited. In a session with Chrome extensions it needs `allowWithExtensions: true`.
+   */
+  typeCredential(credential: string, opts: { field?: CredentialField; selector?: string; allowWithExtensions?: boolean } = {}, options?: RequestOptions) {
+    return this.one<null>({ action: "type", credential, ...opts }, options);
   }
   press(key: string, options?: RequestOptions) {
     return this.one<null>({ action: "press", key }, options);

@@ -35,10 +35,11 @@ export const ErrorCode = {
   limitReached: "limit_reached",
   missingVariables: "missing_variables",
   planLimit: "plan_limit",
-  tooManySecretValues: "too_many_secret_values",
-  secretExists: "secret_exists",
-  secretNotForAi: "secret_not_for_ai",
-  secretNotForShell: "secret_not_for_shell",
+  tooManyCredentialValues: "too_many_credential_values",
+  credentialExists: "credential_exists",
+  credentialNotFound: "credential_not_found",
+  credentialNotForAi: "credential_not_for_ai",
+  credentialNotForShell: "credential_not_for_shell",
   machineTooOld: "machine_too_old",
   /**
    * An agent or task run's errorCode (never an HTTP error): the answer did not match the run's output schema after the
@@ -74,8 +75,8 @@ export const ErrorCode = {
   modelKeyRejected: "model_key_rejected",
   /** 502: another failure of a call on the project's own model key (the provider's text, key scrubbed). */
   modelError: "model_error",
-  /** 413: contexts.create({fromSession}) when the session's cookies and site storage exceed 16 MB. */
-  contextTooLarge: "context_too_large",
+  /** 413: profiles.create({fromSession}) when the session's cookies and site storage exceed 16 MB. */
+  profileTooLarge: "profile_too_large",
   /** 409: the session has ended (e.g. an agent run or continueRun in it). */
   sessionNotRunning: "session_not_running",
   unauthorized: "unauthorized",
@@ -245,32 +246,32 @@ export class MissingVariablesError extends BoxlineError {
 }
 /**
  * `plan_limit`: the plan allows no more of this (402: tasks, schedules switched on, searches on Free, project
- * secrets beyond `maxSecrets`, a session longer than the plan allows); the message says the limit.
+ * credentials beyond `maxCredentials`, a session longer than the plan allows); the message says the limit.
  */
 export class PlanLimitError extends BoxlineError {
   override name = "PlanLimitError";
 }
 /**
- * 409 `too_many_secret_values`: the session already hides as many earlier secret values in its output as it can (256
- * values or 256 KB); a session create, exec, agent run or step adding more is refused. Start a new session.
+ * 409 `too_many_credential_values`: the session already hides as many earlier credential values in its output as it can
+ * (256 values or 256 KB); a session create, exec, agent run or step adding more is refused. Start a new session.
  */
-export class TooManySecretValuesError extends BoxlineError {
-  override name = "TooManySecretValuesError";
+export class TooManyCredentialValuesError extends BoxlineError {
+  override name = "TooManyCredentialValuesError";
 }
-/** 409 `secret_exists`: the project has a secret with that name; change it with secrets.update. */
-export class SecretExistsError extends BoxlineError {
-  override name = "SecretExistsError";
+/** 409 `credential_exists`: the project has a credential with that name; change it with credentials.update. */
+export class CredentialExistsError extends BoxlineError {
+  override name = "CredentialExistsError";
 }
 /**
- * 400 `secret_not_for_ai` / `secret_not_for_shell`: the secret's scope does not allow this use (scope "shell" is not for
- * the AI; a secret goes into a shell only with scope "shell" or "all", or shell: true).
+ * 400 `credential_not_for_ai` / `credential_not_for_shell`: the credential's scope does not allow this use (scope
+ * "shell" is not for the AI; a credential goes into a shell only with scope "shell" or "all", or shell: true).
  */
-export class SecretNotAllowedError extends BoxlineError {
-  override name = "SecretNotAllowedError";
+export class CredentialNotAllowedError extends BoxlineError {
+  override name = "CredentialNotAllowedError";
 }
 /**
  * 409 `machine_too_old`: the session's machine comes from an image older than the API (during a deploy) and cannot take
- * `env` or `secrets`; start a new session.
+ * `env` or `credentials`; start a new session.
  */
 export class MachineTooOldError extends BoxlineError {
   override name = "MachineTooOldError";
@@ -371,10 +372,10 @@ const BY_CODE: Record<string, typeof BoxlineError> = {
   [ErrorCode.limitReached]: LimitReachedError,
   [ErrorCode.missingVariables]: MissingVariablesError,
   [ErrorCode.planLimit]: PlanLimitError,
-  [ErrorCode.tooManySecretValues]: TooManySecretValuesError,
-  [ErrorCode.secretExists]: SecretExistsError,
-  [ErrorCode.secretNotForAi]: SecretNotAllowedError,
-  [ErrorCode.secretNotForShell]: SecretNotAllowedError,
+  [ErrorCode.tooManyCredentialValues]: TooManyCredentialValuesError,
+  [ErrorCode.credentialExists]: CredentialExistsError,
+  [ErrorCode.credentialNotForAi]: CredentialNotAllowedError,
+  [ErrorCode.credentialNotForShell]: CredentialNotAllowedError,
   [ErrorCode.machineTooOld]: MachineTooOldError,
   [ErrorCode.notContinuable]: NotContinuableError,
   [ErrorCode.tooManyMessages]: TooManyMessagesError,
