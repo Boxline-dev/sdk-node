@@ -66,7 +66,7 @@ export interface ClickOptions {
 
 /**
  * One session: a machine with a browser and/or a shell and a shared /workspace disk. `data` is the session as the
- * API last returned it; lifecycle calls (pause, update, extend, …) refresh it.
+ * API last returned it; lifecycle calls (stop, resume, update, extend, …) refresh it.
  */
 export class Session {
   private declare readonly client: Boxline;
@@ -108,15 +108,17 @@ export class Session {
   async refresh(options?: RequestOptions) {
     return this.set(await this.client.sessions.get(this.id, options));
   }
-  async release(options?: RequestOptions) {
-    return this.set(await this.client.sessions.release(this.id, options));
+  /** Saves the session exactly as it is (the whole browser and its files), frees the machine and stops billing. */
+  async stop(options?: RequestOptions) {
+    return this.set(await this.client.sessions.stop(this.id, options));
   }
-  /** Saves browser state and files, frees the machine and stops billing. Connecting again resumes it. */
-  async pause(options?: RequestOptions) {
-    return this.set(await this.client.sessions.pause(this.id, options));
-  }
+  /** Brings a stopped session back on a fresh machine, as it was. */
   async resume(options?: RequestOptions) {
     return this.set(await this.client.sessions.resume(this.id, options));
+  }
+  /** Ends the session for good: what it saved, its recording and its logs are deleted now. It cannot be undone. */
+  async delete(options?: RequestOptions) {
+    return this.set(await this.client.sessions.delete(this.id, options));
   }
   /**
    * Makes the current connectUrl, liveUrl and terminalUrl stop working (use it if one leaked) and closes
@@ -192,7 +194,7 @@ export class Session {
           }
           after = page.nextAfter;
           if (round % 5 === 0) await this.refresh(); // stop by itself once the session has ended
-          if (this.data.status === "COMPLETED" || this.data.status === "ERROR") return;
+          if (this.data.status !== "RUNNING") return;
         } catch {
           /* keep polling; the session may be moving */
         }

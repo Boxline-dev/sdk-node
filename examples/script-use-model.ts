@@ -34,5 +34,5 @@ try {
   const r = await session.runScript(code, { timeoutMs: 180_000, onData: (_stream, data) => process.stdout.write(data) });
   console.log(`exit ${r.exitCode} in ${r.durationMs} ms${r.timedOut ? " (timed out)" : ""}`);
 } finally {
-  await session.release();
+  await session.stop();
 }

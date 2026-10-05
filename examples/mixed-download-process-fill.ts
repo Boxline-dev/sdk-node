@@ -51,5 +51,5 @@ EOF`);
   console.log(`the site says: ${results.at(-1)!.value}`);
   await browser.close();
 } finally {
-  await session.release();
+  await session.stop();
 }

@@ -25,6 +25,6 @@ try {
   const shot = await session.screenshot({ format: "png" });
   console.log(`screenshot: ${Buffer.from(shot.data, "base64").length} bytes of ${shot.mimeType}`);
 } finally {
-  await session.release();
-  console.log("released:", session.status, session.data.endReason);
+  await session.stop();
+  console.log("stopped:", session.status, session.data.stopReason);
 }

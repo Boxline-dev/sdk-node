@@ -28,5 +28,5 @@ try {
   else throw err;
 } finally {
   stop();
-  await session.release();
+  await session.stop();
 }

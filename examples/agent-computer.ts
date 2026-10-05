@@ -34,4 +34,4 @@ for await (const e of bx.agent.stream(run.id)) {
 }
 const done = await bx.agent.get(run.id);
 console.log(`mode ${done.mode}, ${done.steps.length} steps, $${done.usage.costUsd}`);
-await (await bx.sessions.get(done.sessionId)).release().catch(() => undefined);
+await (await bx.sessions.get(done.sessionId)).stop().catch(() => undefined);

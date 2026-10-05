@@ -45,5 +45,5 @@ try {
   await writeFile("computer.png", Buffer.from(o.screenshot!, "base64"));
   console.log(`computer.png: the screen with the pointer drawn on it (${o.mimeType})`);
 } finally {
-  await s.release();
+  await s.stop();
 }

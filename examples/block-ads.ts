@@ -34,5 +34,5 @@ try {
   const top = (report?.data?.top ?? []) as { domain: string; count: number }[];
   if (top.length) console.log(`most blocked: ${top.map((t) => `${t.domain} (${t.count})`).join(", ")}`);
 } finally {
-  await session.release();
+  await session.stop();
 }

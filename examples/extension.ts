@@ -58,7 +58,7 @@ try {
     }
     console.log(`page title: ${title}`);
   } finally {
-    await session.release();
+    await session.stop();
   }
 } finally {
   // Sessions already running with it keep it; new ones can't use it any more.

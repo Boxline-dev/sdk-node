@@ -4,7 +4,8 @@
 
 // ---------------------------------------------------------------- shared
 
-export type SessionStatus = "RUNNING" | "PAUSED" | "COMPLETED" | "ERROR";
+/** RUNNING; STOPPED (saved, no machine, free: resume it); DELETED (ended for good); ERROR (never started). */
+export type SessionStatus = "RUNNING" | "STOPPED" | "DELETED" | "ERROR";
 /** What happens when a CAPTCHA waits for a person: "ask" (default) pauses and hands over, "ignore" carries on, "solve" tries to solve it first. */
 export type CaptchaMode = "ask" | "ignore" | "solve";
 /** A CAPTCHA provider the platform recognises. */
@@ -51,7 +52,6 @@ export interface LoginResponse {
 /** What a plan may use; set per plan in the admin panel. Calls that need a missing one fail with 402 `feature_not_in_plan`. */
 export type PlanFeature =
   | "shell"
-  | "pauseResume"
   | "profiles"
   | "recording"
   | "realisticBrowser"
@@ -269,14 +269,20 @@ export interface SessionData {
   keepAlive: boolean;
   /** Seconds. */
   timeout: number;
-  /** Seconds without activity after which the session ends (endReason "idle"); null: off. */
+  /** Seconds without activity after which the session stops (stopReason "idle"); null: off. */
   idleTimeout?: number | null;
   createdAt: string;
   startedAt: string | null;
-  endedAt: string | null;
   expiresAt: string;
-  endReason: SessionEndReason | null;
-  /** CDP WebSocket for Playwright/Puppeteer (null without a browser or once ended). Treat it like a password. */
+  /** When it stopped (null while it runs; a resume clears it). */
+  stoppedAt: string | null;
+  stopReason: SessionStopReason | null;
+  /** When a stopped session is deleted automatically: `stoppedAt` plus the plan's `retentionDays`, fixed when it stops. */
+  deletesAt: string | null;
+  /** When it was deleted, and by whom: `requested` (sessions.delete) or `retention` (its `deletesAt` passed). */
+  deletedAt: string | null;
+  deleteReason: SessionDeleteReason | null;
+  /** CDP WebSocket for Playwright/Puppeteer (null without a browser or unless the session is running). Treat it like a password. */
   connectUrl: string | null;
   /** The live view page. Treat it like a password. */
   liveUrl: string | null;
@@ -295,7 +301,7 @@ export interface SessionData {
   attention: CaptchaAttention | null;
   workspacePath: string;
   profileId: string | null;
-  /** Whether the session saves its sign-ins back to `profileId` when it ends. */
+  /** Whether the session saves its sign-ins back to `profileId` when it stops. */
   profilePersist?: boolean;
   userMetadata: Record<string, unknown>;
   moves: number;
@@ -306,8 +312,6 @@ export interface SessionData {
   error: string | null;
   recordSession: boolean;
   hasRecording: boolean;
-  /** When the recording, logs and agent-run steps were deleted under the plan's `retentionDays` (null until then). */
-  dataDeletedAt?: string | null;
   setup: string[];
   setupStatus: "none" | "running" | "done" | "failed";
   setupError: string | null;
@@ -327,25 +331,32 @@ export interface SessionData {
 }
 
 /**
- * Why a session ended. "idle": its idleTimeout passed without activity; "disconnected": a browser-only session without
- * keepAlive whose last client left, with no agent run, script or step working in it; "agent_finished": its agent run's
- * own session, released when the run ended (or when a run's continue window passed unused).
+ * Why a session stopped. "requested": sessions.stop; "idle": its idleTimeout passed without activity; "no_clients": a
+ * browser-only session without keepAlive whose last client left, with no agent run, script or step working in it;
+ * "agent_run" / "task": the session an agent run (a task's run) started, stopped when the run ended (or when its continue
+ * window passed unused); "machine_lost": its machine failed and could not be replaced (its last checkpoint is what it saved);
+ * "suspended": an admin suspended the organization.
  */
-export type SessionEndReason =
-  | "released"
+export type SessionStopReason =
+  | "requested"
   | "timeout"
   | "idle"
-  | "disconnected"
-  | "agent_finished"
+  | "no_clients"
+  | "agent_run"
+  | "task"
   | "api_restart"
-  | "paused_expired"
   | "machine_lost"
   | "account_recovered"
+  /** The organization was suspended: its running sessions stopped. */
+  | "suspended"
   /** The organization or the project reached its monthly spending limit. */
   | "spend_limit"
   /** The organization had no credit left (only where the platform enforces credit). */
   | "out_of_credit"
   | (string & {});
+
+/** Why a session was deleted: `requested` (sessions.delete) or `retention` (its `deletesAt` passed). */
+export type SessionDeleteReason = "requested" | "retention";
 
 /** "reject" (the default for new sessions): answer consent banners with "Reject all" or "Necessary only" (never accept), else hide them. */
 export type CookieBanners = "reject" | "off";
@@ -358,7 +369,7 @@ export interface CreateSessionParams {
   /** Seconds (default 300), up to the plan's maxTimeoutSeconds. */
   timeout?: number;
   /**
-   * Opt-in: the session ends (endReason "idle") after this many seconds without activity, 30 to `timeout`. Activity:
+   * Opt-in: the session stops (stopReason "idle") after this many seconds without activity, 30 to `timeout`. Activity:
    * CDP commands, live-view input, terminal keys, exec, files, actions and steps, scripts, agent steps and messages;
    * an agent run working in it (or one that can still be continued) counts the whole time. Protects keepAlive and
    * shell sessions whose client crashed.
@@ -428,7 +439,7 @@ export interface UpdateSessionParams {
 }
 
 export interface SessionListParams {
-  /** One status or several, e.g. ["RUNNING", "PAUSED"]. */
+  /** One status or several, e.g. ["RUNNING", "STOPPED"]. */
   status?: SessionStatus | SessionStatus[];
   /** "browser" (no shell), "combined" (browser and shell) or "shell" (no browser). */
   kind?: "browser" | "combined" | "shell";
@@ -1636,7 +1647,8 @@ export interface Pricing {
   sandboxPerVcpuHour: number;
   sandboxPerGibHour: number;
   defaultShellMachine: { vcpu: number; gib: number; perHour: number };
-  pausedSessions: { freeHours: number; perGbMonthAfter: number };
+  /** A stopped session is free: `perHour` is 0. */
+  stoppedSessions: { perHour: number };
   proxies: { residentialPerGb: number; datacenterPerGb: number; customPerGb: number };
   captchaSolving: { per1000Attempts: number };
   /** Searches included per month, and the price per 1,000 beyond them (null: none beyond), per public plan. */
@@ -1655,7 +1667,8 @@ export interface Pricing {
 export type WebhookEventType =
   | "session.started"
   | "session.expiring"
-  | "session.ended"
+  | "session.stopped"
+  | "session.deleted"
   | "agent_run.started"
   | "agent_run.waiting"
   | "agent_run.resumed"
@@ -1810,7 +1823,7 @@ export interface WebhookEvent<T = Record<string, unknown>> {
 /** Who made a change: "user:<email>" (a console login), "key:<api key id>", "support" (support acting as you) or "platform". */
 export type WebhookActor = string;
 
-/** session.started and session.ended: the session as sessions.get returns it, with every URL (and attention) null. */
+/** session.started, session.stopped and session.deleted: the session as sessions.get returns it, with every URL (and attention) null. */
 export type WebhookSessionData = Omit<SessionData, "setup" | "setupError"> & { userMetadataTruncated?: true };
 
 export interface WebhookSessionExpiringData {
@@ -2036,7 +2049,8 @@ export interface WebhookExtensionData {
 export interface WebhookEventDataMap {
   "session.started": WebhookSessionData;
   "session.expiring": WebhookSessionExpiringData;
-  "session.ended": WebhookSessionData;
+  "session.stopped": WebhookSessionData;
+  "session.deleted": WebhookSessionData;
   "agent_run.started": WebhookAgentRunStartedData;
   "agent_run.waiting": WebhookAgentRunWaitingData;
   "agent_run.resumed": WebhookAgentRunResumedData;

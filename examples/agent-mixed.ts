@@ -36,5 +36,5 @@ const session = await bx.sessions.get(run.sessionId);
 try {
   console.log(`output/total.txt: ${(await session.files.readText("output/total.txt")).trim()}`);
 } finally {
-  await session.release();
+  await session.stop();
 }

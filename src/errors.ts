@@ -85,8 +85,12 @@ export const ErrorCode = {
   modelError: "model_error",
   /** 413: profiles.create({fromSession}) when the session's cookies and site storage exceed 16 MB. */
   profileTooLarge: "profile_too_large",
-  /** 409: the session has ended (e.g. an agent run or continueRun in it). */
+  /** 409: the session is not running (it stopped or was deleted): a call on it, an agent run in a deleted one. */
   sessionNotRunning: "session_not_running",
+  /** 409: sessions.resume when nothing was saved (a machine lost before its first checkpoint, a session from before stop and resume). */
+  nothingSaved: "nothing_saved",
+  /** 409: sessions.resume on a deleted session. */
+  sessionNotStopped: "session_not_stopped",
   unauthorized: "unauthorized",
   notFound: "not_found",
   connectionError: "connection_error",
@@ -352,9 +356,13 @@ export class TooManyMessagesError extends BoxlineError {
 export class RunNotLiveError extends BoxlineError {
   override name = "RunNotLiveError";
 }
-/** 409 `session_not_running`: the session has ended (an agent run started or continued in it, a command, …). */
+/** 409 `session_not_running`: the session is stopped or deleted (a call on a stopped session does not wake it: resume it first). */
 export class SessionNotRunningError extends BoxlineError {
   override name = "SessionNotRunningError";
+}
+/** 409 `nothing_saved`: sessions.resume on a stopped session that saved nothing (a machine lost before its first checkpoint, a session from before stop and resume). */
+export class NothingSavedError extends BoxlineError {
+  override name = "NothingSavedError";
 }
 
 /** Why verifyWebhook refused a delivery. */
@@ -443,6 +451,7 @@ const BY_CODE: Record<string, typeof BoxlineError> = {
   [ErrorCode.tooManyMessages]: TooManyMessagesError,
   [ErrorCode.runNotLive]: RunNotLiveError,
   [ErrorCode.sessionNotRunning]: SessionNotRunningError,
+  [ErrorCode.nothingSaved]: NothingSavedError,
 };
 const BY_STATUS: Record<number, typeof BoxlineError> = { 401: AuthenticationError, 404: NotFoundError, 429: RateLimitError };
 

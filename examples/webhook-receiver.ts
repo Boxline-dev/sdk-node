@@ -20,7 +20,7 @@ let registered: { bx: Boxline; id: string } | null = null;
 
 if (process.argv.includes("--register")) {
   const bx = new Boxline();
-  const endpoint = await bx.webhooks.create({ url, events: ["session.ended", "agent_run.finished", "crawl.finished", "captcha.waiting", "webhook.disabled"], description: "webhook-receiver example" });
+  const endpoint = await bx.webhooks.create({ url, events: ["session.stopped", "agent_run.finished", "crawl.finished", "captcha.waiting", "webhook.disabled"], description: "webhook-receiver example" });
   secrets = [endpoint.secret]; // shown only in this response: kept in memory, never printed
   registered = { bx, id: endpoint.id };
   console.log(`[receiver] registered endpoint ${endpoint.id} for ${url} (${endpoint.events.join(", ")})`);
@@ -52,7 +52,7 @@ const server = createServer((req, res) => {
     handled.add(event.id);
     if (handled.size > 10_000) handled.delete(handled.values().next().value!);
     const d = event.data as Record<string, unknown>;
-    const what = event.type === "session.ended" ? `session ${d.id} ${d.status} (${d.endReason})` : event.type === "webhook.test" ? String(d.message) : JSON.stringify(d).slice(0, 100);
+    const what = event.type === "session.stopped" ? `session ${d.id} ${d.status} (${d.stopReason})` : event.type === "webhook.test" ? String(d.message) : JSON.stringify(d).slice(0, 100);
     console.log(`[receiver] verified ${event.type} ${event.id} (attempt ${attempt}, delivery ${req.headers["boxline-delivery-id"]}): ${what}`);
     res.writeHead(200).end("ok"); // answer fast; do slow work after answering (or queue it)
   });

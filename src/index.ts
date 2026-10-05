@@ -66,6 +66,7 @@ export {
   TooManyMessagesError,
   RunNotLiveError,
   SessionNotRunningError,
+  NothingSavedError,
   type WebhookSignatureFailure,
   type SpendLimitKind,
   AuthenticationError,

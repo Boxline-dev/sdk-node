@@ -22,7 +22,7 @@ try {
     const echo = await s.exec(`echo $${name}`);
     console.log(`echo shows ${echo.stdout.trim()}: the value is hidden in the output`);
   } finally {
-    await s.release();
+    await s.stop();
   }
   await bx.credentials.update(name, { value: randomBytes(24).toString("base64url"), description: null });
   for await (const c of bx.credentials.list()) console.log(`credential ${c.name} (${c.type}): scope ${c.scope}, last used ${c.lastUsedAt ?? "never"}`);

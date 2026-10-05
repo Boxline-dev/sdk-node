@@ -17,19 +17,19 @@ for await (const w of bx.webhooks.list()) if (w.url === url) endpoint = w;
 if (!endpoint) throw new Error(`no endpoint for ${url}: start the receiver with --register first`);
 console.log(`endpoint ${endpoint.id}: ${endpoint.enabled ? "enabled" : `off (${endpoint.disabledReason})`}, events ${endpoint.events.join(", ")}`);
 
-// An event: a session that ends.
+// An event: a session that stops.
 const session = await bx.sessions.create({ timeout: 60, userMetadata: { from: "webhooks example" } });
-await session.release();
-console.log(`session ${session.id} ended (${session.data.endReason})`);
+await session.stop();
+console.log(`session ${session.id} stopped (${session.data.stopReason})`);
 
 // Its delivery, once it has been answered.
 let delivery: WebhookDelivery | undefined;
 for (let i = 0; i < 60 && !delivery; i++) {
   const recent = await bx.webhooks.deliveries(endpoint.id, { limit: 20 }); // newest first: one page is enough
-  delivery = recent.data.find((d) => d.eventType === "session.ended" && d.payload?.data.id === session.id && d.status !== "pending");
+  delivery = recent.data.find((d) => d.eventType === "session.stopped" && d.payload?.data.id === session.id && d.status !== "pending");
   if (!delivery) await sleep(500);
 }
-if (!delivery) throw new Error("the session.ended delivery did not arrive within 30 s");
+if (!delivery) throw new Error("the session.stopped delivery did not arrive within 30 s");
 console.log(`delivery ${delivery.id}: ${delivery.status}, HTTP ${delivery.responseStatus}, ${delivery.attempts} attempt(s), event ${delivery.eventId}`);
 for (const a of delivery.history) console.log(`  attempt at ${a.at}: ${a.status ?? a.errorCode} in ${a.durationMs} ms`);
 

@@ -19,5 +19,5 @@ for await (const s of bx.sessions.list({ q: tag, limit: 2 })) console.log(`  ${+
 
 for await (const page of first.iterPages()) console.log(`page with ${page.data.length} sessions, next = ${page.next ?? "null"}`);
 
-const { results } = await bx.sessions.bulk("release", made.map((s) => s.id));
-console.log(`released: ${results.filter((r) => r.ok).length}/${results.length}`);
+const { results } = await bx.sessions.bulk("delete", made.map((s) => s.id));
+console.log(`deleted: ${results.filter((r) => r.ok).length}/${results.length}`);

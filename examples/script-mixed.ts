@@ -43,5 +43,5 @@ try {
   console.log(`exit ${r.exitCode} in ${r.durationMs} ms`);
   console.log(`output/total.txt (files API): ${(await session.files.readText("output/total.txt")).trim()}`);
 } finally {
-  await session.release();
+  await session.stop();
 }

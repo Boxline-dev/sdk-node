@@ -20,7 +20,7 @@ try {
   if (err instanceof IdempotencyMismatchError) console.log(`another body with that key: ${err.code}`);
   else throw err;
 }
-await a.release();
+await a.stop();
 
 // Your own id for a request, to find it in your logs and ours; the API's id is error.requestId.
 try {

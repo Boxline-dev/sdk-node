@@ -418,24 +418,28 @@ export class Sessions {
   page(params: SessionListParams = {}, options?: RequestOptions): Promise<SessionPage> {
     return this.list(params, options).then((p) => p);
   }
-  /** Pause, resume or release 1 to 100 sessions at once (session ids; 30 calls per minute per project). */
-  bulk(action: "release" | "pause" | "resume", ids: string[], options?: RequestOptions): Promise<BulkResult> {
+  /** Stop, resume or delete 1 to 100 sessions at once (session ids; 30 calls per minute per project). */
+  bulk(action: "stop" | "resume" | "delete", ids: string[], options?: RequestOptions): Promise<BulkResult> {
     return this.client.request<BulkResult>("POST", "/v1/sessions/bulk", { action, ids }, options);
   }
   /** Changes keepAlive, userMetadata, the proxy, the captcha option or the browser settings. */
   update(id: string, patch: UpdateSessionParams, options?: RequestOptions): Promise<Session> {
     return this.one("PATCH", sid(id), patch, options);
   }
-  /** Ends the session and deletes its machine. */
-  release(id: string, options?: RequestOptions): Promise<Session> {
-    return this.one("POST", `${sid(id)}/release`, undefined, options);
+  /**
+   * Saves the session exactly as it is (the whole browser and its files), frees the machine and stops billing. It is
+   * kept for the plan's `retentionDays` (`deletesAt`), then deleted: resume it before.
+   */
+  stop(id: string, options?: RequestOptions): Promise<Session> {
+    return this.one("POST", `${sid(id)}/stop`, undefined, options);
   }
-  /** Saves browser state and files, frees the machine and stops billing. Touching the session resumes it. */
-  pause(id: string, options?: RequestOptions): Promise<Session> {
-    return this.one("POST", `${sid(id)}/pause`, undefined, options);
-  }
+  /** Brings a stopped session back on a fresh machine, as it was (same id; 409 `nothing_saved` when nothing was saved). */
   resume(id: string, options?: RequestOptions): Promise<Session> {
     return this.one("POST", `${sid(id)}/resume`, undefined, options);
+  }
+  /** Ends the session for good: what it saved, its recording and its logs are deleted now. It cannot be undone. */
+  delete(id: string, options?: RequestOptions): Promise<Session> {
+    return this.one("DELETE", sid(id), undefined, options);
   }
   /** Moves the live session to a fresh machine; clients reconnect to the same connectUrl. */
   async move(id: string, options?: RequestOptions): Promise<{ session: Session; timings: MoveTimings; shell: MoveShell | null }> {

@@ -50,11 +50,13 @@ console.log(await page.title());
 
 // The actions API drives the same browser without Playwright, one HTTP call per list of actions.
 const { title, content } = await session.content("markdown");
-await session.release();
+await session.stop();
 ```
 
-`session.liveUrl` is a page where a person can watch and take over. `session.pause()` saves the browser and files and
-stops billing; touching the session resumes it.
+`session.liveUrl` is a page where a person can watch and take over. `session.stop()` saves the whole browser (every
+tab, cookies, storage) and the files, frees the machine and stops billing; `session.resume()` brings it back, same id, as
+it was. A stopped session is kept for your plan's `retentionDays` (`session.data.deletesAt`), then deleted;
+`session.delete()` deletes it now, with its recording and logs.
 
 ## Browser, shell and files together
 
@@ -77,7 +79,7 @@ EOF`);                                                           // the shell: P
 const total = (await s.files.readText("output/total.txt")).trim(); // files: read what the shell wrote
 
 await s.actions([{ action: "fill", selector: "#total", value: total }, { action: "click", selector: "#send" }]);
-await s.release();
+await s.stop();
 ```
 
 The same mix works inside an agent run (`shell: true`: the agent uses `browser_*` tools and `bash`) and inside a
@@ -407,7 +409,7 @@ await bx.extensions.delete(ext.id);
 Signed HTTPS callbacks when a session ends, an agent run, task run or crawl finishes, or a CAPTCHA waits for a person.
 
 ```ts
-const endpoint = await bx.webhooks.create({ url: "https://example.com/webhooks/boxline", events: ["session.ended", "agent_run.finished"] });
+const endpoint = await bx.webhooks.create({ url: "https://example.com/webhooks/boxline", events: ["session.stopped", "agent_run.finished"] });
 // endpoint.secret ("whsec_…") is shown only now: store it with your other secrets.
 ```
 
@@ -446,7 +448,7 @@ try {
 Every list takes `limit` and `after`. Await it for one page, or iterate it for everything (the SDK follows `next`):
 
 ```ts
-const page = await bx.sessions.list({ status: ["RUNNING", "PAUSED"], limit: 50 });
+const page = await bx.sessions.list({ status: ["RUNNING", "STOPPED"], limit: 50 });
 console.log(page.data.length, page.total, page.next);
 
 for await (const s of bx.sessions.list({ status: "RUNNING" })) console.log(s.id);
@@ -470,7 +472,7 @@ Lists: `sessions.list`, `sessions.events`, `sessions.pages`, `profiles.list`, `a
   `InvalidExtensionError`, `PayloadTooLargeError`, `LimitReachedError`, `ExtensionDeniedError`, `CrossSiteRequestError`,
   `MissingVariablesError`, `PlanLimitError`, `CredentialExistsError`, `CredentialNotAllowedError`, `TooManyCredentialValuesError`,
   `CredentialCodeTimeoutError`, `CredentialLinkWrongSiteError`, `CredentialLoginFailedError`, `CodeUrlNotAllowedError`,
-  `MachineTooOldError`, `NotContinuableError`, `TooManyMessagesError`, `SessionNotRunningError`, `AuthenticationError`,
+  `MachineTooOldError`, `NotContinuableError`, `TooManyMessagesError`, `SessionNotRunningError`, `NothingSavedError`, `AuthenticationError`,
   `NotFoundError`, and
   `BoxlineConnectionError` /
   `BoxlineTimeoutError` when no answer came back. `ErrorCode` has the codes.
@@ -497,13 +499,13 @@ Every request carries `Boxline-SDK: node/<version>`.
 
 Every public API operation has a method (the Python SDK has the same names in snake_case; the full list is
 `docs/sdk-methods.json` in the platform repository). Session methods take the id first; a `Session` object has the
-same methods without it (`session.pause()`).
+same methods without it (`session.stop()`).
 
 | Area | Methods |
 |---|---|
 | Account | `me`, `hasFeature`, `auth.signup`, `auth.login`, `auth.logout`, `project.trajectories`, `project.setTrajectories`, `project.settings`, `project.setSettings`, `apiKeys.list`, `apiKeys.create`, `apiKeys.revoke` |
 | Webhooks | `webhooks.create`, `list`, `get`, `update`, `delete`, `rotateSecret`, `test`, `deliveries`, `retryDelivery`; `verifyWebhook` (no request) |
-| Sessions | `sessions.create`, `get`, `list`, `update`, `release`, `pause`, `resume`, `move`, `extend`, `rotateProxy`, `rotateUrls`, `live`, `bulk` |
+| Sessions | `sessions.create`, `get`, `list`, `update`, `stop`, `resume`, `delete`, `move`, `extend`, `rotateProxy`, `rotateUrls`, `live`, `bulk` |
 | Browser | `sessions.actions`, `sessions.computer`; on a session: `goto`, `click`, `hover`, `fill`, `type`, `typeCredential`, `press`, `scroll`, `wait`, `select`, `elements`, `evaluate`, `content`, `screenshot`, `cursor`, `upload`, `tabs`, `newTab`, `switchTab`, `closeTab`, `back`, `forward`, `reload`, `step`, `extract`, `exportCookies`, `computer`, `mouse.move`/`moveBy`/`click`/`down`/`up`/`drag`, `keyboard.key`/`type`/`press` |
 | Shell and scripts | `sessions.exec`, `execStream`, `runScript`, `restartShell` |
 | Files | `sessions.files.list`, `read`, `readText`, `write`, `delete`, `waitFor` |
