@@ -851,7 +851,7 @@ export interface FileRef {
 
 // ---------------------------------------------------------------- logs and recording
 
-export type SessionEventType = "console" | "network" | "navigation" | "error" | "lifecycle" | "action" | "exec" | "captcha";
+export type SessionEventType = "console" | "network" | "navigation" | "error" | "lifecycle" | "action" | "exec" | "files" | "captcha";
 
 /** `data` of an `exec` event: every shell command in the session, whoever ran it. */
 export interface ExecEventData {
@@ -859,9 +859,42 @@ export interface ExecEventData {
   by: "api" | "agent" | "setup" | "script";
   /** The agent run that ran it (`by: "agent"`). */
   runId?: string;
+  /** `by: "agent"`: the run's step number (the step's `n`); `by: "setup"`: the setup command's number. */
+  step?: number;
   exitCode?: number | null;
+  /** `by: "agent"`: the paths (relative to the workspace) of the files the command created or changed, as on the step's `shell`. */
+  files?: string[];
   /** The names of the credentials the command was given. */
   credentials?: string[];
+  [key: string]: unknown;
+}
+
+/** `data` of an `action` event: every browser action, whoever ran it. `text` is its result line; a failure has `level: "error"`. */
+export interface ActionEventData {
+  /** The action name (`click`, `goto`, `step`, …). */
+  action: string;
+  /** `api` (the Actions API, computer and MCP browser tools included), `agent` (an agent run's browser tools) or `script` (a playground script's `step()` or `extract()`). */
+  by: "api" | "agent" | "script";
+  /** `by: "agent"`: the run and its step number (the step's `n`). */
+  runId?: string;
+  step?: number;
+  /** `by: "script"`: the line of your script that made the call, in the editor's numbers. */
+  line?: number;
+  /** `by: "agent"`, with a recording: the recording frame the step ended on (the step's `screen.frame`). */
+  frame?: number;
+  /** A failure's API error code, when it has one (e.g. `provider_unavailable`, `feature_not_in_plan`). */
+  code?: string;
+  [key: string]: unknown;
+}
+
+/** `data` of a `files` event: a write, upload or delete through the Files API (not reads; a shell command's changes are on its `exec` event). */
+export interface FilesEventData {
+  op: "write" | "delete";
+  /** Relative to the workspace. */
+  path: string;
+  /** `op: "write"`: the file's size. */
+  bytes?: number;
+  by: "api";
   [key: string]: unknown;
 }
 
@@ -879,15 +912,21 @@ interface SessionEventBase {
 }
 
 /**
- * One event of a session's log. `exec` events (`text` is the command, credential values hidden) have `data.by` and
- * `data.runId`; the output stays with whoever ran the command: the API caller, or the run's steps.
+ * One event of a session's log. `exec` events (`text` is the command, credential values hidden) have `data.by`,
+ * `data.runId` and `data.step`; `action` events (`text` is the result line) say who ran the action and, for an agent run,
+ * which step; `files` events are the Files API's writes and deletes. The output stays with whoever ran the command: the
+ * API caller, or the run's steps.
  */
 export type SessionEvent =
   | (SessionEventBase & { type: "exec"; data?: ExecEventData })
-  | (SessionEventBase & { type: Exclude<SessionEventType, "exec">; data?: Record<string, unknown> });
+  | (SessionEventBase & { type: "action"; data?: ActionEventData })
+  | (SessionEventBase & { type: "files"; data?: FilesEventData })
+  | (SessionEventBase & { type: Exclude<SessionEventType, "exec" | "action" | "files">; data?: Record<string, unknown> });
 
 export interface SessionEventsParams {
   types?: SessionEventType[];
+  /** Only the events this agent run caused in the session (its actions and shell commands). */
+  runId?: string;
   /** An event seq, or the previous page's `next`. */
   after?: number | string;
   /** Per page: 1–2000, default 500. */
@@ -1299,6 +1338,37 @@ export interface AgentMessageSent {
   delivered: false;
 }
 
+/** The screen a browser or computer tool step led to (see {@link AgentStep.screen}). */
+export interface StepScreen {
+  /** Its number in the session's recording. */
+  frame?: number;
+  url: string;
+  title: string;
+  /** The frame's address: `GET /v1/sessions/{id}/recording/frames/{frame}`. */
+  image?: string;
+}
+
+/** What a bash step did to the workspace (see {@link AgentStep.shell}). */
+export interface StepShell {
+  /** The command's exit code (null when it was stopped). */
+  exitCode: number | null;
+  /**
+   * Files created or changed in the workspace while the command ran: paths relative to the workspace, at most 20, by path.
+   * Deleted files and changes outside the workspace are not listed. Left out by a machine from before this field.
+   */
+  files?: { path: string; bytes: number }[];
+  /** How many more files changed beyond the ones listed. */
+  more?: number;
+}
+
+/** One model reply's cost (see {@link AgentStep.usage}). */
+export interface StepUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Null for a model that is not priced. */
+  costUsd: number | null;
+}
+
 export interface AgentStep {
   /** message: a message you sent (agent.sendMessage), recorded when the model received it. */
   /** code: the run waits for a password's 2FA code or sign-in link (`credentials.pushCode`, or your `codeUrl`), see `state`. */
@@ -1312,7 +1382,10 @@ export interface AgentStep {
   /** handover: who paused the run; captcha "solved": who solved it. */
   by?: "user" | "agent" | "captcha" | "auto" | "person";
   text?: string;
-  /** tool and handover steps: the model's own words with the call (what it is doing and will do next), redacted. */
+  /**
+   * tool and handover steps: the model's own words with the call (what it is doing and will do next) and, when the
+   * provider gives it in words, its reasoning (OpenAI's reasoning summaries, Claude's thinking), redacted.
+   */
   thought?: string;
   name?: string;
   /** A tool's input as the model wrote it: variables appear as %name%, never as their values. */
@@ -1320,6 +1393,18 @@ export interface AgentStep {
   output?: string;
   isError?: boolean;
   ms?: number;
+  /** The step's number in the run, from 1; it never changes. A session event's `data.step` is this number. */
+  n?: number;
+  /**
+   * Browser and computer tool steps: the screen the action led to. `frame` is its number in the session's recording and
+   * `image` that frame's address (an image/jpeg that needs your API key); for a step the model got a screenshot for it is
+   * that exact image. Without a recording (or while the run works with variables) only `url` and `title`.
+   */
+  screen?: StepScreen;
+  /** bash steps: how the command ended and the workspace files it created or changed. The output stays in `output`. */
+  shell?: StepShell;
+  /** The model reply this step is the first of: its tokens and cost. The steps' tokens add up to the run's `usage`. */
+  usage?: StepUsage;
   /**
    * captcha steps: "solving" (automatic solving), "waiting" (a person's turn), "solved" (the run goes on); code steps:
    * "waiting" (a wait began: push the code or link now), then "received" or "timeout". Never the code or the link.

@@ -188,7 +188,7 @@ export class Session {
     return this.client.sessions.events(this.id, params, options);
   }
   /** Events as they happen (the backlog after `after` first). Stop with `break` or the signal. */
-  streamEvents(params: { after?: number } = {}, options?: RequestOptions): AsyncGenerator<SessionEvent> {
+  streamEvents(params: { after?: number; runId?: string } = {}, options?: RequestOptions): AsyncGenerator<SessionEvent> {
     return this.client.sessions.streamEvents(this.id, params, options);
   }
   /** Pages visited in this session. */

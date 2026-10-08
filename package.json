@@ -1,6 +1,6 @@
 {
   "name": "@boxline/sdk",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Node and TypeScript SDK for Boxline: cloud browsers and shell sandboxes for AI agents, with retries, cursor pages and typed errors.",
   "keywords": [
     "boxline",

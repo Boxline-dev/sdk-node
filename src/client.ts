@@ -515,15 +515,16 @@ export class Sessions {
   }
 
   /**
-   * Console, network, navigation, error, lifecycle, action, exec and captcha events, oldest first. Every shell command
-   * is an `exec` event, whoever ran it: `data.by` is `api`, `agent` (with `data.runId`), `setup` or `script`.
+   * Console, network, navigation, error, lifecycle, action, exec, files and captcha events, oldest first. Every shell
+   * command is an `exec` event and every browser action an `action` event, whoever ran it: `data.by` is `api`, `agent`
+   * (with `data.runId` and `data.step`), `setup` or `script`. `runId` keeps the events one agent run caused.
    */
   events(id: string, params: SessionEventsParams = {}, options?: RequestOptions): PagePromise<SessionEvent, Page<SessionEvent> & { nextAfter: number }> {
-    const { types, after, limit } = params;
-    return this.client.list<SessionEvent, { nextAfter: number }>(`${sid(id)}/events`, { types, after: after === undefined ? undefined : String(after), limit }, (e) => e, options);
+    const { types, runId, after, limit } = params;
+    return this.client.list<SessionEvent, { nextAfter: number }>(`${sid(id)}/events`, { types, runId, after: after === undefined ? undefined : String(after), limit }, (e) => e, options);
   }
-  /** Events as they happen: first the backlog after `after`, then live. Stop with `break` or `options.signal`. */
-  async *streamEvents(id: string, params: { after?: number } = {}, options?: RequestOptions): AsyncGenerator<SessionEvent> {
+  /** Events as they happen: first the backlog after `after`, then live (`runId`: only one agent run's). Stop with `break` or `options.signal`. */
+  async *streamEvents(id: string, params: { after?: number; runId?: string } = {}, options?: RequestOptions): AsyncGenerator<SessionEvent> {
     const res = await this.client.send("GET", `${sid(id)}/events/stream${queryString(params)}`, undefined, options);
     yield* sse<SessionEvent>(res.body!);
   }
