@@ -17,7 +17,7 @@ const run = await bx.agent.run({
     `Go to ${site} and download the report (the CSV link). With Python in the shell, add up the revenue column of ` +
     `downloads/report.csv and write the total with two decimals to output/total.txt. Then enter that total in the ` +
     `"Total revenue" field of the form on ${site}, press Send, and reply with the total and what the site answered.`,
-  shell: true,
+  session: { shell: true },
   keepSession: true, // keep the session afterwards, to read output/total.txt
   maxSteps: 30,
 });

@@ -12,7 +12,6 @@ import type {
   AgentRunEvent,
   AgentRunParams,
   AgentRunStarted,
-  ContinueRunParams,
   ApiKeyInfo,
   BulkResult,
   ComputerAction,
@@ -20,7 +19,6 @@ import type {
   ComputerResult,
   Profile,
   ProfileUpdateParams,
-  MoveShell,
   Credential,
   CredentialAuditEntry,
   CredentialCodeAccepted,
@@ -37,7 +35,6 @@ import type {
   CrawlJob,
   CrawlPage,
   CrawlParams,
-  CreateSessionParams,
   ExecExit,
   ExecOptions,
   ExecResult,
@@ -51,14 +48,15 @@ import type {
   ListParams,
   LoginResponse,
   Me,
-  MoveTimings,
   NewApiKey,
   NewWebhookEndpoint,
   ProjectSettings as ProjectSettingsData,
-  AgentProvider,
+  ProjectSettingsParams,
   ModelKey,
   ModelKeyParams,
-  CaptchaMode,
+  AgentProvider,
+  ResumeRunParams,
+  SessionSpec,
   WebhookCreateParams,
   WebhookDelivery,
   WebhookDeliveryListParams,
@@ -79,9 +77,7 @@ import type {
   SessionEvent,
   SessionEventsParams,
   SessionListParams,
-  SessionUrls,
   SignupResponse,
-  Stats,
   Task,
   TaskCreateParams,
   TaskRun,
@@ -89,7 +85,6 @@ import type {
   TaskRunParams,
   TaskRunStatus,
   TaskUpdateParams,
-  TrajectoriesSetting,
   UpdateSessionParams,
   Usage,
   VisitedPage,
@@ -246,14 +241,13 @@ export class Boxline {
     return this.request<SearchResponse>("POST", "/v1/search", params, options);
   }
 
-  /** Usage and cost of the sessions created in a period (default: this month so far). */
+  /**
+   * What the project used and spent in a period (`from`, `to`; default: this month so far): sessions and how many run now
+   * (`running`, with the plan's `concurrencyLimit`), agent runs and their model cost (`agentRuns`, `modelCostUsd`,
+   * `ownKeyModelCostUsd`), seconds, proxy data, CAPTCHA solving and searches, and the same per day in `byDay`.
+   */
   usage(params: { from?: string; to?: string } = {}, options?: RequestOptions): Promise<Usage> {
-    return this.request<Usage>("GET", `/v1/usage${queryString(params)}`, undefined, options);
-  }
-
-  /** Totals and per-day numbers for the last `days` days (UTC, including today). */
-  stats(days = 7, options?: RequestOptions): Promise<Stats> {
-    return this.request<Stats>("GET", `/v1/stats${queryString({ days })}`, undefined, options);
+    return this.request<Usage>("GET", `/v1/project/usage${queryString(params)}`, undefined, options);
   }
 
   /** The public price table and plans (no API key needed). */
@@ -330,26 +324,20 @@ export class Auth {
 /** Project settings. */
 export class ProjectSettings {
   constructor(private readonly client: Boxline) {}
-  /** The Trajectories program setting: on by default; see the Terms of Service and Privacy Policy. */
-  trajectories(options?: RequestOptions): Promise<TrajectoriesSetting> {
-    return this.client.request<TrajectoriesSetting>("GET", "/v1/project/trajectories", undefined, options);
-  }
-  /** Turns the Trajectories program on or off for this project (logged). */
-  setTrajectories(enabled: boolean, opts: { source?: "notice" | "settings" } = {}, options?: RequestOptions): Promise<TrajectoriesSetting> {
-    return this.client.request<TrajectoriesSetting>("PUT", "/v1/project/trajectories", { enabled, ...opts }, options);
-  }
   /**
    * The project's settings: `captchaDefault` is what new sessions and agent runs without a `captcha` option get;
-   * `captchaDefaultEffective` what they get now (the plan may no longer include solving).
+   * `captchaDefaultEffective` what they get now (the plan may no longer include solving); `trajectories` the
+   * Trajectories program setting (on by default; see the Terms of Service and Privacy Policy).
    */
   settings(options?: RequestOptions): Promise<ProjectSettingsData> {
     return this.client.request<ProjectSettingsData>("GET", "/v1/project/settings", undefined, options);
   }
   /**
    * Changes the fields you send (`captchaDefault: "solve"` needs a plan with CAPTCHA solving: 402 otherwise).
-   * `defaultModel` is the model used when a request names none; `null` clears it.
+   * `defaultModel` is the model used when a request names none; `null` clears it. `trajectories: { enabled }` turns the
+   * Trajectories program on or off for this project (the choice is logged).
    */
-  setSettings(params: { captchaDefault?: CaptchaMode; defaultModel?: { provider: AgentProvider; model?: string } | null }, options?: RequestOptions): Promise<ProjectSettingsData> {
+  setSettings(params: ProjectSettingsParams, options?: RequestOptions): Promise<ProjectSettingsData> {
     return this.client.request<ProjectSettingsData>("PUT", "/v1/project/settings", params, options);
   }
   /** The four providers with the project's own-key state (never a key: `preview` is its last 4 characters). */
@@ -374,20 +362,20 @@ export class ApiKeys {
   constructor(private readonly client: Boxline) {}
   /** Active keys, oldest first (the keys themselves are never shown again; `prefix` identifies them). */
   list(params: ListParams = {}, options?: RequestOptions): PagePromise<ApiKeyInfo> {
-    return this.client.list<ApiKeyInfo>("/v1/api-keys", { ...params }, (k) => k, options);
+    return this.client.list<ApiKeyInfo>("/v1/project/api-keys", { ...params }, (k) => k, options);
   }
   /** A new key; `key` is in this response only. */
   create(params: { name?: string } = {}, options?: RequestOptions): Promise<NewApiKey> {
-    return this.client.request<NewApiKey>("POST", "/v1/api-keys", params, options);
+    return this.client.request<NewApiKey>("POST", "/v1/project/api-keys", params, options);
   }
   revoke(id: string, options?: RequestOptions): Promise<void> {
-    return this.client.request<void>("DELETE", `/v1/api-keys/${encodeURIComponent(id)}`, undefined, options);
+    return this.client.request<void>("DELETE", `/v1/project/api-keys/${encodeURIComponent(id)}`, undefined, options);
   }
 }
 
 // ---------------------------------------------------------------- sessions
 
-export type SessionPage = Page<Session> & { total: number; limit: number; offset: number };
+export type SessionPage = Page<Session> & { total: number; limit: number };
 
 export class Sessions {
   readonly files: SessionFiles;
@@ -400,29 +388,36 @@ export class Sessions {
     return this.wrap(await this.client.request<SessionData>(method, path, body, options));
   }
 
-  /** Starts a session (an Idempotency-Key is sent, so a retry never starts a second one). */
-  create(params: CreateSessionParams = {}, options?: RequestOptions): Promise<Session> {
+  /**
+   * Starts a session (an Idempotency-Key is sent, so a retry never starts a second one): a browser (the default), a
+   * shell (`{ browser: false, shell: true }`) or both (`{ shell: true }`).
+   */
+  create(params: SessionSpec = {}, options?: RequestOptions): Promise<Session> {
     return this.one("POST", "/v1/sessions", params, options);
   }
+  /** The session, with freshly signed `connectUrl`, `liveUrl` and `terminalUrl` every time (null where the session has no browser or shell, or is not running). */
   get(id: string, options?: RequestOptions): Promise<Session> {
     return this.one("GET", sid(id), undefined, options);
   }
   /**
-   * Sessions, newest first unless `sort` says otherwise. Await it for one page (`total` counts every match), or
-   * `for await (const s of bx.sessions.list())` for all of them.
+   * Sessions, newest first unless `sort` says otherwise; `kind` filters browser, shell or combined sessions. Await it for
+   * one page (`total` counts every match), or `for await (const s of bx.sessions.list())` for all of them.
    */
   list(params: SessionListParams = {}, options?: RequestOptions): PagePromise<Session, SessionPage> {
-    return this.client.list<Session, { total: number; limit: number; offset: number }>("/v1/sessions", { ...params }, this.wrap, options);
-  }
-  /** @deprecated Use list(): its first page has `total` too. */
-  page(params: SessionListParams = {}, options?: RequestOptions): Promise<SessionPage> {
-    return this.list(params, options).then((p) => p);
+    return this.client.list<Session, { total: number; limit: number }>("/v1/sessions", { ...params }, this.wrap, options);
   }
   /** Stop, resume or delete 1 to 100 sessions at once (session ids; 30 calls per minute per project). */
   bulk(action: "stop" | "resume" | "delete", ids: string[], options?: RequestOptions): Promise<BulkResult> {
     return this.client.request<BulkResult>("POST", "/v1/sessions/bulk", { action, ids }, options);
   }
-  /** Changes keepAlive, userMetadata, the proxy, the captcha option or the browser settings. */
+  /**
+   * The one call that changes a running session, with the field names and shapes `create` has: `keepAlive`, `timeout` (its
+   * length in seconds from its last start), `idleTimeout`, `userMetadata`, `proxy`, `captcha`, `browser` settings,
+   * `blockAds` and `cookieBanners`, plus `rotateProxy: true` (a new proxy IP now) and `rotateUrls: true` (new signed URLs;
+   * every earlier one stops working). The fields fixed at create (`browser` or `shell` on or off, `viewport`, `profile`,
+   * `recordSession`, `setup`, `extensions`, `env`, `credentials`) throw NotUpdatableError (400 `not_updatable`). A session
+   * that is not running throws SessionNotRunningError.
+   */
   update(id: string, patch: UpdateSessionParams, options?: RequestOptions): Promise<Session> {
     return this.one("PATCH", sid(id), patch, options);
   }
@@ -441,35 +436,14 @@ export class Sessions {
   delete(id: string, options?: RequestOptions): Promise<Session> {
     return this.one("DELETE", sid(id), undefined, options);
   }
-  /** Moves the live session to a fresh machine; clients reconnect to the same connectUrl. */
-  async move(id: string, options?: RequestOptions): Promise<{ session: Session; timings: MoveTimings; shell: MoveShell | null }> {
-    const r = await this.client.request<{ session: SessionData; timings: MoveTimings; shell?: MoveShell | null }>("POST", `${sid(id)}/move`, undefined, options);
-    return { session: this.wrap(r.session), timings: r.timings, shell: r.shell ?? null };
-  }
-  /** Adds time (60–3600 s), up to the plan's maximum session length. */
-  extend(id: string, seconds: number, options?: RequestOptions): Promise<Session> {
-    return this.one("POST", `${sid(id)}/extend`, { seconds }, options);
-  }
-  /** A new IP for the session's proxy. */
-  rotateProxy(id: string, options?: RequestOptions): Promise<Session> {
-    return this.one("POST", `${sid(id)}/proxy/rotate`, undefined, options);
-  }
-  /** Revokes the session's connect, live and terminal URLs and returns the session with fresh ones. */
-  rotateUrls(id: string, options?: RequestOptions): Promise<Session> {
-    return this.one("POST", `${sid(id)}/rotate-urls`, undefined, options);
-  }
-  /** Fresh signed URLs (treat them like passwords). */
-  live(id: string, options?: RequestOptions): Promise<SessionUrls> {
-    return this.client.request<SessionUrls>("GET", `${sid(id)}/live`, undefined, options);
-  }
-
   /**
    * Runs browser actions in order, next to the browser; stops at the first failure. A bare string is a plain-English
    * step: `["click Sign in", {action: "fill", selector: "#q", value: "x"}]`. Each result's `text` says what happened.
+   * BrowserDisabledError (409) on a session created with `browser: false`.
    */
   async actions(id: string, actions: ActionItem[] | ActionItem, opts: { timeoutMs?: number } = {}, options?: RequestOptions): Promise<ActionResult[]> {
     const list = Array.isArray(actions) ? actions : [actions];
-    const r = await this.client.request<{ results: ActionResult[] }>("POST", `${sid(id)}/actions`, { actions: list, ...opts }, atLeast(this.client, options, actionsWait(list)));
+    const r = await this.client.request<{ results: ActionResult[] }>("POST", `${sid(id)}/browser/actions`, { actions: list, ...opts }, atLeast(this.client, options, actionsWait(list)));
     return r.results;
   }
 
@@ -480,12 +454,12 @@ export class Sessions {
    * cannot be mapped, or a point off the screen, throws (400 `invalid_request` / `out_of_viewport`).
    */
   computer(id: string, action: ComputerAction, opts: ComputerOptions = {}, options?: RequestOptions): Promise<ComputerResult> {
-    return this.client.request<ComputerResult>("POST", `${sid(id)}/computer`, { ...action, ...opts }, options);
+    return this.client.request<ComputerResult>("POST", `${sid(id)}/browser/computer`, { ...action, ...opts }, options);
   }
 
-  /** Runs a shell command (persistent bash by default: cd/export survive between calls). */
   /**
-   * Runs a command and returns its output. It is read as a stream (headers at once, the API keeps the connection
+   * Runs a command in the session's shell (persistent bash by default: cd/export survive between calls) and returns its
+   * output. ShellDisabledError (409) on a session created without `shell: true`. It is read as a stream (headers at once, the API keeps the connection
    * alive), so neither a long command nor a wait for the session's setup runs into an HTTP client's own limits
    * (Node's fetch gives up after 300 s without headers or data). Output past 64 KB is cut in the middle, as
    * `truncated` says.
@@ -500,7 +474,7 @@ export class Sessions {
   /** Runs a command and streams its output as it happens; resolves with the exit information. */
   async execStream(id: string, command: string, onData: (stream: "stdout" | "stderr", data: string) => void, opts: ExecOptions & { signal?: AbortSignal } = {}, options?: RequestOptions): Promise<ExecExit> {
     const { signal, ...rest } = opts;
-    const res = await this.client.send("POST", `${sid(id)}/exec`, { command, ...rest, stream: true }, { signal, ...options });
+    const res = await this.client.send("POST", `${sid(id)}/shell/exec`, { command, ...rest, stream: true }, { signal, ...options });
     let exit: ExecExit | null = null;
     for await (const msg of ndjson<{ type: string; data?: string; status?: number; code?: string; message?: string; requestId?: string } & Partial<ExecExit>>(res.body!)) {
       if (msg.type === "exit") exit = { exitCode: msg.exitCode ?? null, timedOut: Boolean(msg.timedOut), durationMs: msg.durationMs ?? 0, truncated: Boolean(msg.truncated) };
@@ -511,13 +485,13 @@ export class Sessions {
     return exit ?? { exitCode: null, timedOut: false, durationMs: 0, truncated: false };
   }
   /**
-   * Runs Playwright code inside the session's own sandbox (needs a shell), streaming its output to `onData`. In
+   * Runs Playwright code inside the session's own sandbox (needs a browser and a shell), streaming its output to `onData`. In
    * scope: `page`, `context`, `browser`, `env`, and `step()`, `extract()`, `useModel(model)` / `useModel(provider,
    * model)`. A step or extract uses the call's own `{provider, model}`, else the last `useModel()`, else `ai`.
    */
   async runScript(id: string, code: string, opts: RunScriptOptions = {}, options?: RequestOptions): Promise<ScriptResult> {
     const { signal, onData: _onData, ...body } = opts;
-    const res = await this.client.send("POST", `${sid(id)}/scripts/run`, { code, ...body }, { signal, ...options });
+    const res = await this.client.send("POST", `${sid(id)}/browser/script`, { code, ...body }, { signal, ...options });
     let stdout = "";
     let stderr = "";
     let exit = { exitCode: null as number | null, timedOut: false, durationMs: 0 };
@@ -537,10 +511,13 @@ export class Sessions {
   }
   /** Writes the browser's cookies as a Netscape cookie file in the workspace (for curl -b / wget). */
   exportCookies(id: string, path?: string, options?: RequestOptions): Promise<{ path: string; count: number }> {
-    return this.client.request<{ path: string; count: number }>("POST", `${sid(id)}/browser/cookies/export`, path === undefined ? {} : { path }, options);
+    return this.client.request<{ path: string; count: number }>("POST", `${sid(id)}/browser/export-cookies`, path === undefined ? {} : { path }, options);
   }
 
-  /** Console, network, navigation, error, lifecycle, action, exec and captcha events, oldest first. */
+  /**
+   * Console, network, navigation, error, lifecycle, action, exec and captcha events, oldest first. Every shell command
+   * is an `exec` event, whoever ran it: `data.by` is `api`, `agent` (with `data.runId`), `setup` or `script`.
+   */
   events(id: string, params: SessionEventsParams = {}, options?: RequestOptions): PagePromise<SessionEvent, Page<SessionEvent> & { nextAfter: number }> {
     const { types, after, limit } = params;
     return this.client.list<SessionEvent, { nextAfter: number }>(`${sid(id)}/events`, { types, after: after === undefined ? undefined : String(after), limit }, (e) => e, options);
@@ -589,22 +566,38 @@ class Capture {
   }
 }
 
+/**
+ * Files in a session's /workspace, shared by the shell and the browser's downloads folder. Every kind of session has them.
+ * Reading a file, listing a folder and downloading a folder (`archive`) also work on a STOPPED session, read-only and
+ * without starting a machine, until the session is deleted: they are served from the workspace it saved (NothingSavedError
+ * when it saved none). Writing, deleting and waiting for a file need a running session (SessionNotRunningError).
+ */
 export class SessionFiles {
   constructor(private readonly client: Boxline) {}
   private url(id: string, q: Query, suffix = "") {
     return `${sid(id)}/files${suffix}${queryString(q)}`;
   }
+  /** The entries of a folder (`.` is the workspace): name, type, size and mtime. Also on a stopped session. */
   list(id: string, path = ".", options?: RequestOptions): Promise<FileList> {
     return this.client.request<FileList>("GET", this.url(id, { path, list: "1" }), undefined, options);
   }
-  /** A file's bytes. */
+  /** A file's bytes. Also on a stopped session. */
   read(id: string, path: string, options?: RequestOptions): Promise<Uint8Array> {
     return this.client.bytes("GET", this.url(id, { path }), undefined, options);
+  }
+  /**
+   * A folder and everything in it as one `.tar.gz` (the bytes): everything an agent made, in one call (`path` defaults to
+   * the whole workspace; `.boxline/` is left out and links are stored as links, never followed). Also on a stopped session.
+   * At most 1 GiB and 100,000 entries (ArchiveTooLargeError, before any byte is sent); NotADirectoryError for a file,
+   * InvalidPathError for a path outside the workspace, ArchiveBusyError when two archives of the session are being made.
+   */
+  archive(id: string, path?: string, options?: RequestOptions): Promise<Uint8Array> {
+    return this.client.bytes("GET", this.url(id, { path }, "/archive"), undefined, options);
   }
   async readText(id: string, path: string, options?: RequestOptions): Promise<string> {
     return new TextDecoder().decode(await this.read(id, path, options));
   }
-  /** Writes a file (folders are made as needed). */
+  /** Writes a file (folders are made as needed). Running sessions only. */
   write(id: string, path: string, data: string | Uint8Array | Blob, options?: RequestOptions): Promise<FileRef> {
     return this.client.request<FileRef>("PUT", this.url(id, { path }), undefined, {
       ...options,
@@ -698,9 +691,10 @@ export class Credentials {
    * (a secret's `value`; a password's `password`, and `totpSecret` when it has 2FA), else a 400 `invalid_request`; so
    * does a change of where a password's codes come from (`codeSource`, removing 2FA included, or `codeUrl`: the
    * `password` again). A 409 `conflict` when the sites, scope, `shell`, `codeSource` or `codeUrl` changed meanwhile
-   * (send it again). A new `codeUrl` answers with a new `codeUrlSecret`, shown once. A running agent run keeps the
-   * values it started with; a session that exports the credential gets the new ones on its next machine (move,
-   * resume, recovery).
+   * (send it again). A new `codeUrl` answers with a new `codeUrlSecret`, shown once, and so does `rotateCodeUrlSecret:
+   * true` (any time, for a password with `codeSource` "url": requests to `codeUrl` are signed with it from now on, check
+   * them with `verifyWebhook`; the old one stops at once). A running agent run keeps the values it started with; a session
+   * that exports the credential gets the new ones on its next machine (resume, recovery).
    */
   update(name: string, patch: CredentialUpdateParams, options?: RequestOptions): Promise<CredentialWritten> {
     return this.client.request<CredentialWritten>("PATCH", credentialPath(name), patch, options);
@@ -720,13 +714,6 @@ export class Credentials {
   pushCode(name: string, code: CredentialCodePush, options?: RequestOptions): Promise<CredentialCodeAccepted> {
     return this.client.request<CredentialCodeAccepted>("POST", `${credentialPath(name)}/codes`, code, options);
   }
-  /**
-   * For a password with `codeSource: "url"`: a new `codeUrlSecret` (`whsec_…`, shown this once). Requests to `codeUrl` are
-   * signed with it from now on (check them with `verifyWebhook`); the old one stops at once.
-   */
-  rotateCodeUrlSecret(name: string, options?: RequestOptions): Promise<{ codeUrlSecret: string }> {
-    return this.client.request<{ codeUrlSecret: string }>("POST", `${credentialPath(name)}/code-url-secret`, undefined, options);
-  }
   /** Changes to credentials and each use (once per session, command, run, script, task run, typed field or 2FA code) and pushed codes, newest first. */
   audit(params: CredentialAuditParams = {}, options?: RequestOptions): PagePromise<CredentialAuditEntry> {
     return this.client.list<CredentialAuditEntry>("/v1/credentials/audit", { ...params }, (e) => e, options);
@@ -739,18 +726,18 @@ export class Credentials {
 export class Crawl {
   constructor(private readonly client: Boxline) {}
   start(params: CrawlParams, options?: RequestOptions): Promise<CrawlJob> {
-    return this.client.request<CrawlJob>("POST", "/v1/crawl", params, options);
+    return this.client.request<CrawlJob>("POST", "/v1/crawls", params, options);
   }
   /** The job and one page of its pages (`limit: 0` for the job only); `next` is the cursor of the following pages. */
   get(id: string, params: CrawlGetParams = {}, options?: RequestOptions): Promise<CrawlJob> {
-    return this.client.request<CrawlJob>("GET", `/v1/crawl/${encodeURIComponent(id)}${queryString({ ...params })}`, undefined, options);
+    return this.client.request<CrawlJob>("GET", `/v1/crawls/${encodeURIComponent(id)}${queryString({ ...params })}`, undefined, options);
   }
   /** Jobs, newest first (without their pages). */
   list(params: ListParams = {}, options?: RequestOptions): PagePromise<CrawlJob> {
-    return this.client.list<CrawlJob>("/v1/crawl", { ...params }, (j) => j, options);
+    return this.client.list<CrawlJob>("/v1/crawls", { ...params }, (j) => j, options);
   }
   cancel(id: string, options?: RequestOptions): Promise<CrawlJob> {
-    return this.client.request<CrawlJob>("POST", `/v1/crawl/${encodeURIComponent(id)}/cancel`, undefined, options);
+    return this.client.request<CrawlJob>("POST", `/v1/crawls/${encodeURIComponent(id)}/cancel`, undefined, options);
   }
   /** Every page crawled so far, in index order: `for await (const p of bx.crawl.pages(id))`. */
   async *pages(id: string, params: { limit?: number } = {}, options?: RequestOptions): AsyncGenerator<CrawlPage> {
@@ -797,17 +784,19 @@ export class Webhooks {
   get(id: string, options?: RequestOptions): Promise<WebhookEndpoint> {
     return this.client.request<WebhookEndpoint>("GET", whid(id), undefined, options);
   }
-  /** Changes the URL, events, description, or switches it on or off (`enabled: true` also forgets its failures). */
-  update(id: string, patch: WebhookUpdateParams, options?: RequestOptions): Promise<WebhookEndpoint> {
-    return this.client.request<WebhookEndpoint>("PATCH", whid(id), patch, options);
+  /**
+   * Changes the URL, events, description, or switches it on or off (`enabled: true` also forgets its failures).
+   * `rotateSecret: true` makes a new signing secret: the answer then has it as `secret` (shown this once), and the old one
+   * keeps signing for 24 hours (a second v1).
+   */
+  update(id: string, patch: WebhookUpdateParams & { rotateSecret: true }, options?: RequestOptions): Promise<NewWebhookEndpoint>;
+  update(id: string, patch: WebhookUpdateParams, options?: RequestOptions): Promise<WebhookEndpoint>;
+  update(id: string, patch: WebhookUpdateParams, options?: RequestOptions): Promise<WebhookEndpoint | NewWebhookEndpoint> {
+    return this.client.request<WebhookEndpoint | NewWebhookEndpoint>("PATCH", whid(id), patch, options);
   }
   /** Deletes the endpoint with its queue and delivery log. */
   delete(id: string, options?: RequestOptions): Promise<void> {
     return this.client.request<void>("DELETE", whid(id), undefined, options);
-  }
-  /** A new secret (in this response only); the old one keeps signing too for 24 hours (a second v1). */
-  rotateSecret(id: string, options?: RequestOptions): Promise<NewWebhookEndpoint> {
-    return this.client.request<NewWebhookEndpoint>("POST", `${whid(id)}/rotate-secret`, undefined, options);
   }
   /**
    * Sends a `webhook.test` event to this endpoint now, or with `type` a made-up sample of that event type (marked
@@ -818,7 +807,7 @@ export class Webhooks {
   }
   /** Every event type an endpoint can subscribe to, with its group and description (subscribe to "*" for all). */
   eventTypes(options?: RequestOptions): Promise<WebhookEventTypeList> {
-    return this.client.request<WebhookEventTypeList>("GET", "/v1/webhooks/events", undefined, options);
+    return this.client.request<WebhookEventTypeList>("GET", "/v1/webhooks/event-types", undefined, options);
   }
   /** The endpoint's deliveries, newest first, each with its attempt history; `status` filters them. */
   deliveries(id: string, params: WebhookDeliveryListParams = {}, options?: RequestOptions): PagePromise<WebhookDelivery> {
@@ -847,8 +836,8 @@ export interface WaitOptions {
 }
 
 /**
- * Tasks: saved agent runs (an instruction with %name% variables, an optional output schema, browser settings, a saved
- * login and a model), run by hand or on a schedule. Every run is an agent run tagged with the task. Needs the plan's
+ * Tasks: saved agent runs (an instruction with %name% variables, an optional output schema, the `session` each run
+ * starts with, credentials and a model), run by hand or on a schedule. Every run is an agent run tagged with the task. Needs the plan's
  * `agentRuns`; the plan limits tasks and schedules switched on (PlanLimitError).
  */
 export class Tasks {
@@ -972,7 +961,10 @@ export class Extensions {
 
 // ---------------------------------------------------------------- agent
 
-/** Agent runs: a model (Claude or GPT) drives the session's browser and shell to finish a task. */
+/**
+ * Agent runs: a model (Claude, GPT, Grok or Gemini) drives the session's browser and/or shell to finish a task. Its tools
+ * follow the session: `run({ task, session: { browser: false, shell: true } })` is a shell-only run.
+ */
 export class Agent {
   constructor(private readonly client: Boxline) {}
   /** Providers and models customers can choose, with prices and whether each is configured on the server. */
@@ -980,8 +972,9 @@ export class Agent {
     return this.client.request<AgentModelCatalog>("GET", "/v1/agent/models", undefined, options);
   }
   /**
-   * Starts a run and returns right away (an Idempotency-Key is sent, so a retry never starts a second run). With
-   * `output` (a JSON Schema) the answer is JSON matching it: read it with `wait<T>(id)` or `get<T>(id)`.
+   * Starts a run and returns right away (an Idempotency-Key is sent, so a retry never starts a second run). `session` is
+   * the run's own session, as `sessions.create` takes it (or `sessionId` to work in an existing one). With `output` (a
+   * JSON Schema) the answer is JSON matching it: read it with `wait<T>(id)` or `get<T>(id)`.
    */
   run(params: AgentRunParams, options?: RequestOptions): Promise<AgentRunStarted> {
     return this.client.request<AgentRunStarted>("POST", "/v1/agent/runs", params, options);
@@ -994,30 +987,32 @@ export class Agent {
   list(params: ListParams = {}, options?: RequestOptions): PagePromise<AgentRun> {
     return this.client.list<AgentRun>("/v1/agent/runs", { ...params }, (r) => r, options);
   }
-  /** Take the browser from the agent (it finishes its current action, then waits). RunNotLiveError when its server stopped. */
-  takeover(id: string, reason?: string, options?: RequestOptions): Promise<AgentRun> {
-    return this.client.request<AgentRun>("POST", `/v1/agent/runs/${encodeURIComponent(id)}/takeover`, reason === undefined ? {} : { reason }, options);
+  /**
+   * Pauses the run: the agent finishes its current action, then waits (status `paused`), so a person can act in the live
+   * view or the terminal (a CAPTCHA, a 2FA code, a choice). Works on every kind of run, a shell-only one too. `agent.resume`
+   * goes on. RunNotLiveError when its server stopped; a 409 BoxlineError (code `invalid_state`) unless the run is running.
+   */
+  pause(id: string, reason?: string, options?: RequestOptions): Promise<AgentRun> {
+    return this.client.request<AgentRun>("POST", `/v1/agent/runs/${encodeURIComponent(id)}/pause`, reason === undefined ? {} : { reason }, options);
   }
-  /** Give the browser back; the agent reads `note` before it continues. RunNotLiveError when its server stopped: continueRun. */
-  handBack(id: string, note?: string, options?: RequestOptions): Promise<AgentRun> {
-    return this.client.request<AgentRun>("POST", `/v1/agent/runs/${encodeURIComponent(id)}/handback`, note === undefined ? {} : { note }, options);
+  /**
+   * Keeps a run going: the SAME run, one job and one run id (its steps and usage add up). It works on
+   * - a paused run (after `pause`, a CAPTCHA, or the agent asking for help): `{ note }` is told to the agent with the news
+   *   that a person had control, and it looks at the page again;
+   * - a run that stopped early (its `resumable` is set: it used all its steps (`max_steps`), reached its `maxCostUsd`, had too
+   *   many tool errors in a row, repeated itself, or its API server restarted): `{ maxSteps, maxCostUsd, note, variables }`.
+   *   A run that had `variables` needs them again (MissingVariablesError otherwise). A stopped session is resumed first.
+   * NotResumableError when the run is neither (it is running, completed, canceled, failed for another reason, or its
+   * window passed), RunNotLiveError when its server stopped. An Idempotency-Key is sent, so a retry never resumes it twice.
+   *
+   * `await bx.agent.resume(run.id, { maxSteps: 30, note: "The CSV is downloaded already" })`
+   */
+  resume<T = string>(id: string, params: ResumeRunParams = {}, options?: RequestOptions): Promise<AgentRun<T>> {
+    return this.client.request<AgentRun<T>>("POST", `/v1/agent/runs/${encodeURIComponent(id)}/resume`, params, options);
   }
   /** Stops the run for good. */
   cancel(id: string, options?: RequestOptions): Promise<AgentRun> {
     return this.client.request<AgentRun>("POST", `/v1/agent/runs/${encodeURIComponent(id)}/cancel`, undefined, options);
-  }
-  /**
-   * Continues a run that stopped at one of its limits (errorCode max_steps, max_cost, too_many_errors or no_progress)
-   * while its `continuable` is set: a new run in the same session, with the same model, mode, output schema, credentials
-   * and profile, and a compact record of what the previous run did. Returns the new run (`continuedFrom` links
-   * back); wait for it with `wait(run.id)` or `stream(run.id)` like any run. A run that had `variables` needs them again
-   * (MissingVariablesError otherwise). NotContinuableError: it did not stop at a limit, was continued already, or its
-   * window passed. An Idempotency-Key is sent, so a retry never starts a second run.
-   *
-   * `const next = await bx.agent.continueRun(run.id, { maxSteps: 30, instruction: "The CSV is downloaded already" })`
-   */
-  continueRun<T = string>(id: string, params: ContinueRunParams = {}, options?: RequestOptions): Promise<AgentRun<T>> {
-    return this.client.request<AgentRun<T>>("POST", `/v1/agent/runs/${encodeURIComponent(id)}/continue`, params, options);
   }
   /**
    * Tells a working run something (1–2000 characters) without taking the browser: the agent reads it at its next step
@@ -1033,7 +1028,7 @@ export class Agent {
    * final `done` event, after which the iteration ends.
    */
   async *stream<T = string>(id: string, options?: RequestOptions): AsyncGenerator<AgentRunEvent<T>> {
-    const res = await this.client.send("GET", `/v1/agent/runs/${encodeURIComponent(id)}/events`, undefined, options);
+    const res = await this.client.send("GET", `/v1/agent/runs/${encodeURIComponent(id)}/events/stream`, undefined, options);
     for await (const event of sse<AgentRunEvent<T>>(res.body!)) {
       yield event;
       if (event.type === "done") return;

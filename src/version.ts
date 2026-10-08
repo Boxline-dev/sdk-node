@@ -1,2 +1,2 @@
 /** The SDK's version, sent to the API as `Boxline-SDK: node/<version>`. Keep it equal to package.json. */
-export const VERSION = "2.0.0";
+export const VERSION = "3.0.0";

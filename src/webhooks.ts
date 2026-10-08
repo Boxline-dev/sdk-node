@@ -4,8 +4,8 @@
  *   Boxline-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>">[,v1=…]
  *
  * keyed with the endpoint's secret (the whole `whsec_…` string as UTF-8); for 24 hours after a rotation a second v1
- * signed with the old secret follows. verifyWebhook accepts and refuses exactly what the API's reference
- * (apps/api/src/webhooks/signing.ts) does; tests/unit/sdk-webhooks.test.ts checks it against vectors from that signer.
+ * signed with the old secret follows. verifyWebhook accepts and refuses exactly what the API's own signer does; the
+ * tests check it against vectors made by that signer.
  *
  * HMAC-SHA256 is computed here without node:crypto or Web Crypto, so the check is synchronous and works the same in
  * Node 18+, Deno, Bun, edge runtimes and browsers.

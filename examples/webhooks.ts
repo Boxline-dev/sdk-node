@@ -38,7 +38,7 @@ const again = await bx.webhooks.retryDelivery(endpoint.id, delivery.id);
 console.log(`sent again: ${again.status}, HTTP ${again.responseStatus}, answer "${again.responseBody}"`);
 
 // A new secret; the receiver only knows the old one, which keeps signing for 24 hours.
-const rotated = await bx.webhooks.rotateSecret(endpoint.id);
+const rotated = await bx.webhooks.update(endpoint.id, { rotateSecret: true });
 console.log(`secret rotated at ${rotated.secretRotatedAt}; the old one signs until ${rotated.previousSecretExpiresAt} (the new secret is in this response only)`);
 
 const test = await bx.webhooks.test(endpoint.id);

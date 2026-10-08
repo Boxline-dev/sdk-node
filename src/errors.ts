@@ -55,8 +55,8 @@ export const ErrorCode = {
    */
   outputInvalid: "output_invalid",
   /**
-   * Agent-run errorCodes (never HTTP errors) for a run that stopped at one of its limits and can be continued
-   * (agent.continueRun) while its `continuable` is set: its maxSteps, its maxCostUsd, maxConsecutiveErrors tool errors in
+   * Agent-run errorCodes (never HTTP errors) for a run that stopped at one of its limits and can be resumed
+   * (agent.resume) while its `resumable` is set: its maxSteps, its maxCostUsd, maxConsecutiveErrors tool errors in
    * a row, or the same call with the same result 5 times in a row.
    */
   maxSteps: "max_steps",
@@ -64,18 +64,18 @@ export const ErrorCode = {
   tooManyErrors: "too_many_errors",
   noProgress: "no_progress",
   /**
-   * Agent-run errorCode (continuable like the limits): the API server running the loop stopped (a restart, a deploy)
-   * while its session went on; agent.continueRun picks it up in the same browser.
+   * Agent-run errorCode (resumable like the limits): the API server running the loop stopped (a restart, a deploy)
+   * while its session went on; agent.resume picks it up in the same session.
    */
   serverRestarted: "server_restarted",
-  /** Agent-run errorCodes: its session reached its time limit, or ended another way, while it worked (not continuable). */
+  /** Agent-run errorCodes: its session reached its time limit, or ended another way, while it worked (not resumable). */
   sessionTimeout: "session_timeout",
   sessionEnded: "session_ended",
-  /** 409: agent.continueRun on a run that did not stop at a limit, was continued already, or whose window passed. */
-  notContinuable: "not_continuable",
+  /** 409: agent.resume on a run that is neither paused nor stopped early (`resumable`), or whose resume window passed. */
+  notResumable: "not_resumable",
   /** 409: agent.sendMessage after 50 messages to one run. */
   tooManyMessages: "too_many_messages",
-  /** 409: takeover, handBack or sendMessage on a run whose server stopped (continue it instead). */
+  /** 409: pause, resume or sendMessage on a run whose server stopped (resume it once it shows as failed with `server_restarted`). */
   runNotLive: "run_not_live",
   /** 400: project.setModelKey when the provider does not accept the key (nothing is saved). */
   invalidModelKey: "invalid_model_key",
@@ -87,8 +87,25 @@ export const ErrorCode = {
   profileTooLarge: "profile_too_large",
   /** 409: the session is not running (it stopped or was deleted): a call on it, an agent run in a deleted one. */
   sessionNotRunning: "session_not_running",
-  /** 409: sessions.resume when nothing was saved (a machine lost before its first checkpoint, a session from before stop and resume). */
+  /**
+   * 409: sessions.resume, or reading a stopped session's files or a folder archive, when nothing was saved (a machine lost
+   * before its first checkpoint, a session from before stop and resume).
+   */
   nothingSaved: "nothing_saved",
+  /** 409: a browser call (actions, computer, script, exportCookies) on a session created with `browser: false`. */
+  browserDisabled: "browser_disabled",
+  /** 409: a shell call (exec, restartShell, script) on a session created without `shell: true`. */
+  shellDisabled: "shell_disabled",
+  /** 400: sessions.update with a field that is fixed when the session is created (the message names it). */
+  notUpdatable: "not_updatable",
+  /** 413: files.archive of a folder over 1 GiB or 100,000 entries (checked before any byte is sent). */
+  archiveTooLarge: "archive_too_large",
+  /** 429: files.archive with two archives already being made for the session. */
+  archiveBusy: "archive_busy",
+  /** 400 or 403: a file path outside the workspace, or through a link. */
+  invalidPath: "invalid_path",
+  /** 400: files.archive (or a folder listing) of a path that is a file. */
+  notADirectory: "not_a_directory",
   /** 409: sessions.resume on a deleted session. */
   sessionNotStopped: "session_not_stopped",
   unauthorized: "unauthorized",
@@ -339,19 +356,19 @@ export class MachineTooOldError extends BoxlineError {
 }
 
 /**
- * 409 `not_continuable`: agent.continueRun on a run that did not stop at one of its limits, was already continued (the
- * message names the run that did), or whose continue window has passed.
+ * 409 `not_resumable`: agent.resume on a run that is neither paused nor stopped early (`resumable`): it is running,
+ * completed, canceled, failed for another reason, or its resume window has passed (the message says which).
  */
-export class NotContinuableError extends BoxlineError {
-  override name = "NotContinuableError";
+export class NotResumableError extends BoxlineError {
+  override name = "NotResumableError";
 }
 /** 409 `too_many_messages`: a run takes at most 50 messages (agent.sendMessage). */
 export class TooManyMessagesError extends BoxlineError {
   override name = "TooManyMessagesError";
 }
 /**
- * 409 `run_not_live`: agent.takeover, handBack or sendMessage on a run whose API server stopped (a restart, a deploy):
- * no loop is left to act on it. Continue it (agent.continueRun) once it shows as failed with `server_restarted`.
+ * 409 `run_not_live`: agent.pause, resume or sendMessage on a run whose API server stopped (a restart, a deploy): no
+ * loop is left to act on it. Resume it (agent.resume) once it shows as failed with `server_restarted`.
  */
 export class RunNotLiveError extends BoxlineError {
   override name = "RunNotLiveError";
@@ -360,9 +377,44 @@ export class RunNotLiveError extends BoxlineError {
 export class SessionNotRunningError extends BoxlineError {
   override name = "SessionNotRunningError";
 }
-/** 409 `nothing_saved`: sessions.resume on a stopped session that saved nothing (a machine lost before its first checkpoint, a session from before stop and resume). */
+/**
+ * 409 `nothing_saved`: sessions.resume, or a read of a stopped session's files or folder (`files.read`, `files.list`,
+ * `files.archive`), on a session that saved nothing (a machine lost before its first checkpoint, a session from before stop
+ * and resume).
+ */
 export class NothingSavedError extends BoxlineError {
   override name = "NothingSavedError";
+}
+/** 409 `browser_disabled`: the session was created with `browser: false`, so it has no browser to drive (create it with `browser: true`). */
+export class BrowserDisabledError extends BoxlineError {
+  override name = "BrowserDisabledError";
+}
+/** 409 `shell_disabled`: the session was created without `shell: true`, so it has no shell (create it with `shell: true`). */
+export class ShellDisabledError extends BoxlineError {
+  override name = "ShellDisabledError";
+}
+/**
+ * 400 `not_updatable`: `sessions.update` named a field that is fixed when the session is created (`browser` on or off,
+ * `shell`, `viewport`, `profile`, `recordSession`, `setup`, `extensions`, `env`, `credentials`); the message names it.
+ */
+export class NotUpdatableError extends BoxlineError {
+  override name = "NotUpdatableError";
+}
+/** 413 `archive_too_large`: the folder is over 1 GiB or 100,000 entries; nothing was sent. Download smaller folders, or single files. */
+export class ArchiveTooLargeError extends BoxlineError {
+  override name = "ArchiveTooLargeError";
+}
+/** 429 `archive_busy`: two archives of this session are being made already; try again when one is done (retried automatically). */
+export class ArchiveBusyError extends RateLimitError {
+  override name = "ArchiveBusyError";
+}
+/** `invalid_path` (400 or 403): the path is outside the session's workspace, or goes through a link. */
+export class InvalidPathError extends BoxlineError {
+  override name = "InvalidPathError";
+}
+/** 400 `not_a_directory`: the path is a file, and the call needs a folder (`files.archive`). */
+export class NotADirectoryError extends BoxlineError {
+  override name = "NotADirectoryError";
 }
 
 /** Why verifyWebhook refused a delivery. */
@@ -447,11 +499,18 @@ const BY_CODE: Record<string, typeof BoxlineError> = {
   [ErrorCode.credentialLoginTimeout]: CredentialLoginTimeoutError,
   [ErrorCode.codeUrlNotAllowed]: CodeUrlNotAllowedError,
   [ErrorCode.machineTooOld]: MachineTooOldError,
-  [ErrorCode.notContinuable]: NotContinuableError,
+  [ErrorCode.notResumable]: NotResumableError,
   [ErrorCode.tooManyMessages]: TooManyMessagesError,
   [ErrorCode.runNotLive]: RunNotLiveError,
   [ErrorCode.sessionNotRunning]: SessionNotRunningError,
   [ErrorCode.nothingSaved]: NothingSavedError,
+  [ErrorCode.browserDisabled]: BrowserDisabledError,
+  [ErrorCode.shellDisabled]: ShellDisabledError,
+  [ErrorCode.notUpdatable]: NotUpdatableError,
+  [ErrorCode.archiveTooLarge]: ArchiveTooLargeError,
+  [ErrorCode.archiveBusy]: ArchiveBusyError,
+  [ErrorCode.invalidPath]: InvalidPathError,
+  [ErrorCode.notADirectory]: NotADirectoryError,
 };
 const BY_STATUS: Record<number, typeof BoxlineError> = { 401: AuthenticationError, 404: NotFoundError, 429: RateLimitError };
 

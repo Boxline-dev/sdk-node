@@ -103,8 +103,6 @@ export interface Plan {
   features: Record<PlanFeature, boolean>;
   public?: boolean;
 }
-/** @deprecated Use Plan. */
-export type PlanLimits = Plan;
 
 /** The project's settings (GET/PUT /v1/project/settings). */
 export interface ProjectSettings {
@@ -114,6 +112,8 @@ export interface ProjectSettings {
   captchaDefaultEffective: CaptchaMode;
   /** The model used when a request names no provider or model (explicit request, then this, then the server default); null: none. */
   defaultModel: { provider: AgentProvider; model: string } | null;
+  /** The Trajectories program: whether sessions may be used for trajectory datasets, and the notice (see the Terms of Service and Privacy Policy). */
+  trajectories: TrajectoriesSetting;
   updatedAt: string | null;
   /** The project's own user who changed it last in the console (null for an API key or support). */
   updatedBy: string | null;
@@ -145,6 +145,16 @@ export interface ModelKeyParams {
   key?: string;
   /** "project" needs a saved key; "platform" needs a plan with `platformModels` (402 otherwise). */
   use?: ModelKeySource;
+}
+
+/** What `project.setSettings` takes: the fields you send change, the others stay. */
+export interface ProjectSettingsParams {
+  /** `"solve"` needs a plan with CAPTCHA solving (402 otherwise). */
+  captchaDefault?: CaptchaMode;
+  /** The model used when a request names none; `null` clears it. */
+  defaultModel?: { provider: AgentProvider; model?: string } | null;
+  /** Turns the Trajectories program on or off. The choice is logged; `source` says where it was made (default "settings"). */
+  trajectories?: { enabled: boolean; source?: "notice" | "settings" };
 }
 
 /** A project's Trajectories program setting (see the Terms of Service and Privacy Policy). */
@@ -284,15 +294,15 @@ export interface SessionData {
   deleteReason: SessionDeleteReason | null;
   /** CDP WebSocket for Playwright/Puppeteer (null without a browser or unless the session is running). Treat it like a password. */
   connectUrl: string | null;
-  /** The live view page. Treat it like a password. */
+  /** The live view page (null without a browser, or unless the session is running). Treat it like a password. */
   liveUrl: string | null;
-  /** The terminal WebSocket (null without a shell). Treat it like a password. */
+  /** The terminal WebSocket (null without a shell, or unless the session is running). Treat it like a password. */
   terminalUrl: string | null;
   /** The session's proxy or proxy rules (never passwords), or null. */
   proxy: PublicProxy<ProxyConfig> | PublicProxy<ProxyRule>[] | null;
   /** The browser mode, and the clock and language actually in force. */
   browserSettings: BrowserSettings;
-  /** The page size (fixed at start, kept across moves and resumes); null without a browser. */
+  /** The page size (fixed at start, kept across resumes and recovery); null without a browser. */
   viewport: Viewport | null;
   /** Whether this session may be used for trajectory datasets (fixed when it started). */
   trajectoriesEligible: boolean;
@@ -304,7 +314,6 @@ export interface SessionData {
   /** Whether the session saves its sign-ins back to `profileId` when it stops. */
   profilePersist?: boolean;
   userMetadata: Record<string, unknown>;
-  moves: number;
   /** When the last automatic checkpoint was taken (null before the first one). */
   checkpointAt: string | null;
   /** How many times the session was brought back on a new machine after its machine stopped. */
@@ -333,7 +342,7 @@ export interface SessionData {
 /**
  * Why a session stopped. "requested": sessions.stop; "idle": its idleTimeout passed without activity; "no_clients": a
  * browser-only session without keepAlive whose last client left, with no agent run, script or step working in it;
- * "agent_run" / "task": the session an agent run (a task's run) started, stopped when the run ended (or when its continue
+ * "agent_run" / "task": the session an agent run (a task's run) started, stopped when the run ended (or when its resume
  * window passed unused); "machine_lost": its machine failed and could not be replaced (its last checkpoint is what it saved);
  * "suspended": an admin suspended the organization.
  */
@@ -361,7 +370,12 @@ export type SessionDeleteReason = "requested" | "retention";
 /** "reject" (the default for new sessions): answer consent banners with "Reject all" or "Necessary only" (never accept), else hide them. */
 export type CookieBanners = "reject" | "off";
 
-export interface CreateSessionParams {
+/**
+ * The settings of a session, in one object: what `sessions.create` takes, and what agent runs and tasks take as `session`
+ * for the session they start. `browser` (default true) and `shell` (default false) choose the kind: a browser only, a
+ * shell only (`{ browser: false, shell: true }`) or both; a session needs at least one.
+ */
+export interface SessionSpec {
   /** `false` for a session without a browser, or options for the one it gets (see BrowserOptions). */
   browser?: boolean | BrowserOptions;
   /** A bash shell with Python, Node, ffmpeg and sudo, sharing /workspace with the browser. */
@@ -371,7 +385,7 @@ export interface CreateSessionParams {
   /**
    * Opt-in: the session stops (stopReason "idle") after this many seconds without activity, 30 to `timeout`. Activity:
    * CDP commands, live-view input, terminal keys, exec, files, actions and steps, scripts, agent steps and messages;
-   * an agent run working in it (or one that can still be continued) counts the whole time. Protects keepAlive and
+   * an agent run working in it (or one that can still be resumed) counts the whole time. Protects keepAlive and
    * shell sessions whose client crashed.
    */
   idleTimeout?: number | null;
@@ -384,7 +398,7 @@ export interface CreateSessionParams {
   /** Keep replay frames of this session (default true). */
   recordSession?: boolean;
   /**
-   * Shell commands run when the session starts and again after a move or resume, e.g.
+   * Shell commands run when the session starts and again after a resume, e.g.
    * ["sudo apt-get install -y ffmpeg", "pip install yt-dlp"]. Needs shell: true.
    */
   setup?: string[];
@@ -408,7 +422,7 @@ export interface CreateSessionParams {
   extensions?: string[];
   /**
    * Variables for the session's shell (needs shell: true): new terminals, exec, scripts and `setup` commands get them,
-   * and they are set again on every new machine (move, resume, recovery). Names like the shell's
+   * and they are set again on every new machine (resume, recovery). Names like the shell's
    * ([A-Za-z_][A-Za-z0-9_]*, not PATH, HOME or BOXLINE_*), at most 100, 64 KB together. Kept sealed; the session
    * shows the names only.
    */
@@ -423,19 +437,37 @@ export interface CreateSessionParams {
   credentials?: string[];
 }
 
+/** What `sessions.create` takes: a SessionSpec. */
+export type CreateSessionParams = SessionSpec;
+
+/**
+ * What `sessions.update` (`session.update`) changes on a running session, with the field names and shapes `sessions.create`
+ * has. Fixed when the session is created, and `NotUpdatableError` (400 `not_updatable`, naming the field) here: `browser` on
+ * or off, `shell`, `viewport`, `profile`, `recordSession`, `setup`, `extensions`, `env` and `credentials`.
+ */
 export interface UpdateSessionParams {
   keepAlive?: boolean;
+  /**
+   * The session's length in seconds, counted from its last start (a resume restarts it), as on create; `expiresAt` moves to
+   * match. At least 60 s from now, at most the plan's maximum (PlanLimitError).
+   */
+  timeout?: number;
   /** Seconds without activity before it ends (counted from now), 30 to its timeout; null switches it off. */
   idleTimeout?: number | null;
   userMetadata?: Record<string, unknown>;
   /** A new proxy applies at once (open connections are closed); null removes it. */
   proxy?: ProxyOption | null;
   captcha?: CaptchaMode;
+  /** The browser's settings (mode, locale, timezone), never on or off. */
   browser?: BrowserOptions;
   /** Applies at once; turning it on also closes open connections to listed sites. */
   blockAds?: boolean;
   /** Applies at once: "reject" also answers banners already open. */
   cookieBanners?: CookieBanners;
+  /** A new IP now for the session's proxy (a sticky one keeps its IP until then); 400 without a proxy. */
+  rotateProxy?: boolean;
+  /** New signed `connectUrl`, `liveUrl` and `terminalUrl`: every earlier one stops working. The answer carries the new ones. */
+  rotateUrls?: boolean;
 }
 
 export interface SessionListParams {
@@ -454,41 +486,12 @@ export interface SessionListParams {
   limit?: number;
   /** The `next` of the previous page. */
   after?: string;
-  /** @deprecated Use `after` (cursor pages). */
-  offset?: number;
 }
-/** @deprecated Use SessionListParams. */
-export type SessionListFilters = SessionListParams;
 
 export interface ListParams {
   limit?: number;
   /** The `next` of the previous page. */
   after?: string;
-}
-
-export interface SessionUrls {
-  liveUrl: string | null;
-  terminalUrl: string | null;
-  connectUrl: string | null;
-}
-
-export interface MoveTimings {
-  captureMs: number;
-  acquireMs: number;
-  restoreMs: number;
-  totalMs: number;
-}
-
-/**
- * Sessions with a shell, after a move: where the shell continues and which exported variables came along (the
- * session's env and credentials are set again as well). Running processes do not move; the ones that were stopped are listed.
- */
-export interface MoveShell {
-  cwd: string;
-  /** Names of the variables the commands exported. */
-  exported: string[];
-  /** `command` with credential values hidden, at most 200 characters; `seconds`: how long it had run. */
-  stoppedProcesses: { pid: number; command: string; seconds: number }[];
 }
 
 export interface BulkResult {
@@ -685,7 +688,7 @@ export interface ComputerOptions {
   cursor?: boolean;
 }
 
-/** What POST /v1/sessions/:id/computer answers: what happened, and the screen after it. */
+/** What POST /v1/sessions/:id/browser/computer answers: what happened, and the screen after it. */
 export interface ComputerResult {
   ok: boolean;
   /** The provider's action name. */
@@ -831,7 +834,8 @@ export interface RunScriptOptions {
 
 export interface FileEntry {
   name: string;
-  type: "file" | "dir" | "other";
+  /** `symlink`: a link, never followed (it is not downloadable). */
+  type: "file" | "dir" | "symlink" | "other";
   size: number;
   /** ISO date. */
   mtime: string;
@@ -847,10 +851,23 @@ export interface FileRef {
 
 // ---------------------------------------------------------------- logs and recording
 
-export interface SessionEvent {
+export type SessionEventType = "console" | "network" | "navigation" | "error" | "lifecycle" | "action" | "exec" | "captcha";
+
+/** `data` of an `exec` event: every shell command in the session, whoever ran it. */
+export interface ExecEventData {
+  /** Who ran it: `api` (sessions.exec), `agent` (an agent run's bash; `runId` is the run), `setup` (a `setup` command) or `script` (a Playwright script's run). */
+  by: "api" | "agent" | "setup" | "script";
+  /** The agent run that ran it (`by: "agent"`). */
+  runId?: string;
+  exitCode?: number | null;
+  /** The names of the credentials the command was given. */
+  credentials?: string[];
+  [key: string]: unknown;
+}
+
+interface SessionEventBase {
   seq: number;
   at: string;
-  type: "console" | "network" | "navigation" | "error" | "lifecycle" | "action" | "exec" | "captcha";
   level?: string;
   text?: string;
   url?: string;
@@ -859,11 +876,18 @@ export interface SessionEvent {
   resourceType?: string;
   durationMs?: number;
   tabId?: string;
-  data?: Record<string, unknown>;
 }
 
+/**
+ * One event of a session's log. `exec` events (`text` is the command, credential values hidden) have `data.by` and
+ * `data.runId`; the output stays with whoever ran the command: the API caller, or the run's steps.
+ */
+export type SessionEvent =
+  | (SessionEventBase & { type: "exec"; data?: ExecEventData })
+  | (SessionEventBase & { type: Exclude<SessionEventType, "exec">; data?: Record<string, unknown> });
+
 export interface SessionEventsParams {
-  types?: SessionEvent["type"][];
+  types?: SessionEventType[];
   /** An event seq, or the previous page's `next`. */
   after?: number | string;
   /** Per page: 1–2000, default 500. */
@@ -1146,30 +1170,28 @@ export type OutputSchema = Record<string, unknown>;
 
 export interface AgentRunParams {
   task: string;
-  /** Work in this session (its own settings apply) instead of a new one. */
+  /** Work in this session (its own settings apply) instead of a new one. Not with `session` (400 `invalid_request`). */
   sessionId?: string;
-  /** `false` for a run without a browser, or options for the run's own session (see BrowserOptions). */
-  browser?: boolean | BrowserOptions;
-  shell?: boolean;
   /**
-   * Seconds for the run's own session (default 1800, or the plan's maximum when shorter; PlanLimitError above it). Not
-   * with sessionId: that session keeps its own time (extend it with sessions.extend).
+   * The run's own session, as `sessions.create` takes it (a SessionSpec): a browser only (the default), a shell only
+   * (`{ browser: false, shell: true }`) or both, with its proxy, captcha, extensions, profile, timeout and so on. Its
+   * `timeout` defaults to 1800 s for a run (or the plan's maximum when that is shorter; PlanLimitError above it). Not with
+   * `sessionId`: that session keeps its own settings (change its length with `sessions.update(id, { timeout })`).
+   * `session.credentials` are exported into the session's shell; the run's own `credentials` are what the AI may type.
    */
-  timeout?: number;
-  /** The run's own session's idleTimeout (see CreateSessionParams.idleTimeout). Not with sessionId. */
-  idleTimeout?: number;
+  session?: SessionSpec;
   /**
    * The run's work budget in model turns: 1–1000, default 30. `null`: no step limit, the run goes until it is done or
    * its session's time ends it (set a maxCostUsd or a sensible timeout then). At the limit it stops with errorCode
-   * "max_steps" and can be continued (agent.continueRun).
+   * "max_steps" and can be resumed (agent.resume) while its `resumable` is set.
    */
   maxSteps?: number | null;
   /**
    * A money budget next to maxSteps (0.01–100 USD of model cost, as usage.costUsd counts it), checked before each model
-   * call: the run stops with errorCode "max_cost" (continuable) once it is reached; one call can go past it. Default none.
+   * call: the run stops with errorCode "max_cost" (resumable) once it is reached; one call can go past it. Default none.
    */
   maxCostUsd?: number | null;
-  /** Tool errors in a row after which the run stops with errorCode "too_many_errors" (continuable): 1–20, default 5. */
+  /** Tool errors in a row after which the run stops with errorCode "too_many_errors" (resumable): 1–20, default 5. */
   maxConsecutiveErrors?: number;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   /** Keep the run's own session after it finishes (until its expiresAt, with keepAlive on). */
@@ -1181,28 +1203,15 @@ export interface AgentRunParams {
    * credential linked to the session's profile is added for you.
    */
   credentials?: string[];
-  /**
-   * For the run's own session: a profile to start with. When it links a password credential (profiles.update), the
-   * run gets that credential as if it were listed in `credentials`.
-   */
-  profile?: { id: string; persist?: boolean };
   /** "anthropic" or "openai"; defaults to the first configured provider. */
   provider?: AgentProvider;
   /** e.g. "claude-opus-5", "claude-sonnet-5", "gpt-6-sol"; defaults to the provider's default model. */
   model?: string;
-  /** A proxy for the run's own session (ignored with sessionId: that session's proxy applies). */
-  proxy?: ProxyOption;
-  /** CAPTCHAs on the run's own session: "ask" (default) pauses until a person solves one; "ignore" carries on; "solve" tries first. */
-  captcha?: CaptchaMode;
   /**
    * "computer": the model drives the page with its provider's own computer-use tool on screenshots (models with
    * supportsComputerUse in agent.models(); 400 otherwise, or without a browser). Default "tools".
    */
   mode?: AgentMode;
-  /** For the run's own session (with sessionId that session's settings apply). */
-  blockAds?: boolean;
-  cookieBanners?: CookieBanners;
-  extensions?: string[];
   /**
    * Allow `variables` in a session with extensions, which can read every typed value (400
    * `variables_with_extensions` otherwise); a warning goes into the session's events.
@@ -1239,8 +1248,8 @@ export interface AgentRunStarted {
 }
 
 /**
- * A run's `errorCode`. The first four are limits: the run stopped without finishing and can be continued
- * (agent.continueRun) while `continuable` is set; so can "server_restarted" (the API server running it stopped while its
+ * A run's `errorCode`. The first four are limits: the run stopped without finishing and can be resumed
+ * (agent.resume) while `resumable` is set; so can "server_restarted" (the API server running it stopped while its
  * session went on). "session_timeout": its session reached its time limit; "session_ended":
  * its session ended another way (`error` names how); "output_invalid": the answer did not match the output schema;
  * "internal": an error on the platform's side. Other codes are those of the platform error that stopped it.
@@ -1262,17 +1271,23 @@ export type AgentRunErrorCode =
   | "handover_timeout"
   | (string & {});
 
-/** The body of agent.continueRun. */
-export interface ContinueRunParams {
-  /** 1–1000, or null for no step limit (default: the run's own). */
-  maxSteps?: number | null;
-  /** The new run's own money budget, 0.01–100 USD, or null for none (default: the run's own). */
-  maxCostUsd?: number | null;
-  /** An extra note for the model, at most 2000 characters (the new run's first `message` step). */
-  instruction?: string;
+/**
+ * What agent.resume takes: a `note` for any run; for a run that stopped early (`resumable`), also limits and its
+ * variables again.
+ */
+export interface ResumeRunParams {
   /**
-   * The original run's variables again (their values are never stored): every name, as text or `{value}`. They keep the
-   * sites and shell rule they had (MissingVariablesError when one is missing).
+   * An extra note for the model, at most 2000 characters (it shows as a `message` step). A paused run is also told that a
+   * person had the browser.
+   */
+  note?: string;
+  /** A run that stopped early: the steps this stretch may take, 1–1000, or null for no step limit (default: the run's own). */
+  maxSteps?: number | null;
+  /** The model cost this stretch may add, 0.01–100 USD, or null for none (default: the run's own). */
+  maxCostUsd?: number | null;
+  /**
+   * The run's variables again (their values are never stored): every name, as text or `{value}`. They keep the sites and
+   * shell rule they had (MissingVariablesError when one is missing).
    */
   variables?: Record<string, string | { value: string }>;
 }
@@ -1287,7 +1302,7 @@ export interface AgentMessageSent {
 export interface AgentStep {
   /** message: a message you sent (agent.sendMessage), recorded when the model received it. */
   /** code: the run waits for a password's 2FA code or sign-in link (`credentials.pushCode`, or your `codeUrl`), see `state`. */
-  type: "text" | "tool" | "handover" | "handback" | "captcha" | "message" | "code";
+  type: "text" | "tool" | "handover" | "resume" | "captcha" | "message" | "code";
   at: string;
   /** message steps: who wrote it, its id, when it was sent (`at` is when the model got it). */
   from?: "user";
@@ -1326,7 +1341,7 @@ export interface AgentStep {
  */
 export interface AgentRun<T = string> {
   id: string;
-  /** paused: the user has the browser (took it over, or the agent asked for help). */
+  /** paused: a person has the browser (`agent.pause`, a CAPTCHA, or the agent asked for help). */
   status: "running" | "paused" | "completed" | "failed" | "canceled";
   task: string;
   sessionId: string;
@@ -1342,7 +1357,7 @@ export interface AgentRun<T = string> {
   maxCostUsd?: number | null;
   maxConsecutiveErrors?: number;
   /**
-   * handover / handback steps mark when the user had the browser. `captcha` steps say what happened to a CAPTCHA the
+   * handover / resume steps mark when a person had the browser (`agent.pause` ... `agent.resume`). `captcha` steps say what happened to a CAPTCHA the
    * run paused for: `state` "solving" (automatic solving), "waiting" (a person's turn, with `reason`), then "solved"
    * with `by` ("auto" or "person") and `ms` (how long the run waited).
    */
@@ -1358,12 +1373,9 @@ export interface AgentRun<T = string> {
   output?: OutputSchema | null;
   error: string | null;
   errorCode?: AgentRunErrorCode | null;
-  /** Set while the run can be continued (agent.continueRun): it stopped at a limit, and its session is kept until then. */
-  continuable?: { until: string } | null;
-  /** The run this one continues, and the run that continued this one. */
-  continuedFrom?: string | null;
-  continuedBy?: string | null;
-  /** The names of the run's own variables (never values): continueRun needs their values again. */
+  /** Set while the run can be resumed (agent.resume): it stopped early (a limit, or a server restart), and its session is kept until then. */
+  resumable?: { until: string } | null;
+  /** The names of the run's own variables (never values): agent.resume needs their values again. */
   variableNames?: string[];
   usage: { inputTokens: number; outputTokens: number; costUsd: number | null };
   /** Set while paused: who asked for the handover and why ("captcha": the run continues by itself once it is solved). */
@@ -1390,7 +1402,7 @@ export type AgentRunEvent<T = string> =
       resultText?: string | null;
       error: string | null;
       errorCode?: AgentRunErrorCode | null;
-      continuable?: { until: string } | null;
+      resumable?: { until: string } | null;
     };
 
 // ---------------------------------------------------------------- tasks
@@ -1418,24 +1430,13 @@ export interface TaskVariable {
 }
 
 /**
- * The settings of each run's own session, as on sessions.create, checked when saved and again at each run. A custom
- * proxy's password is stored encrypted and never returned. `allowWithExtensions` is needed for a task with secret
- * variables or credentials and extensions (VariablesWithExtensionsError otherwise).
+ * A saved task's session, as `GET /v1/tasks/:id` returns it: the SessionSpec the task was saved with, except that `env` is
+ * the list of its names (the values are sealed) and a custom proxy has no password.
  */
-export interface TaskBrowser extends BrowserOptions {
-  shell?: boolean;
-  proxy?: ProxyOption | null;
-  captcha?: CaptchaMode;
-  viewport?: Viewport;
-  /** Seconds for each run's own session (as timeout on agent.run), and its idleTimeout. */
-  timeout?: number;
-  idleTimeout?: number;
-  blockAds?: boolean;
-  cookieBanners?: CookieBanners;
-  /** This project's uploaded extensions (the plan's `extensions`), at most 10. */
-  extensions?: string[];
-  allowWithExtensions?: boolean;
-}
+export type TaskSession = Omit<SessionSpec, "env" | "proxy"> & {
+  env?: string[];
+  proxy?: boolean | PublicProxy<ProxyConfig> | PublicProxy<ProxyRule>[] | null;
+};
 
 /** A task's schedule as you set it; on update its fields are merged into the current schedule. */
 export interface TaskScheduleInput {
@@ -1474,9 +1475,6 @@ export interface TaskLastRun {
   finishedAt: string | null;
 }
 
-/** A browser profile each run's session starts with: its id, or `{id, persist}` (persist: keep what the run changes). */
-export type TaskProfile = string | { id: string; persist?: boolean };
-
 export interface TaskCreateParams {
   /** 1–100 characters. */
   name: string;
@@ -1491,8 +1489,18 @@ export interface TaskCreateParams {
   credentials?: string[];
   /** Structured output for every run (see OutputSchema). */
   output?: OutputSchema;
-  browser?: TaskBrowser;
-  profile?: TaskProfile;
+  /**
+   * The settings of each run's own session, as `sessions.create` takes them (a SessionSpec), checked when saved and again
+   * at each run, so a task can be shell only: `{ browser: false, shell: true }`. A browser profile goes in `session.profile`.
+   * `session.env` is sealed like a run's variables and read back as names only; a custom proxy's password is never returned.
+   * Each run's session lasts 1800 s unless `session.timeout` says otherwise.
+   */
+  session?: SessionSpec;
+  /**
+   * Needed for a task with secret variables or credentials and a session with extensions (VariablesWithExtensionsError
+   * otherwise); a warning goes into the session's events.
+   */
+  allowWithExtensions?: boolean;
   /** From agent.models() (default: the server's default model). */
   model?: { provider?: AgentProvider; model?: string };
   /** 1–1000 (default 30), or null for no step limit. */
@@ -1513,8 +1521,9 @@ export interface TaskUpdateParams {
   /** The whole new list; null or [] removes them. */
   credentials?: string[] | null;
   output?: OutputSchema | null;
-  browser?: TaskBrowser | null;
-  profile?: TaskProfile | null;
+  /** The whole new SessionSpec (as on create); null removes it. */
+  session?: SessionSpec | null;
+  allowWithExtensions?: boolean;
   model?: { provider?: AgentProvider; model?: string } | null;
   /** null: no step limit. */
   maxSteps?: number | null;
@@ -1525,7 +1534,7 @@ export interface TaskUpdateParams {
   schedule?: TaskScheduleInput | null;
 }
 
-/** A task as stored: secret variables without values, `browser.proxy` without its password. */
+/** A task as stored: secret variables without values, `session.env` as names, `session.proxy` without its password. */
 export interface Task {
   id: string;
   name: string;
@@ -1534,8 +1543,9 @@ export interface Task {
   /** Names of the credentials its runs get (never values). */
   credentials: string[];
   output: OutputSchema | null;
-  browser: TaskBrowser | null;
-  profile: { id: string; persist: boolean } | null;
+  /** The settings of each run's own session (a SessionSpec; `env` as names), or null for the defaults. */
+  session: TaskSession | null;
+  allowWithExtensions?: boolean;
   model: { provider?: AgentProvider; model?: string } | null;
   /** null: no step limit (a task saved without one shows 30). */
   maxSteps: number | null;
@@ -1594,7 +1604,7 @@ export interface TaskRun<T = unknown> {
 export interface TaskRunParams {
   /** Values by name. Secret variables must be given on every run; plain ones fall back to their defaults. */
   variables?: Record<string, string | number | boolean>;
-  /** Work in this session (its own settings apply; the task's `browser` and `profile` do not). */
+  /** Work in this session (its own settings apply; the task's `session` does not). */
   sessionId?: string;
 }
 
@@ -1608,8 +1618,18 @@ export interface TaskRunListParams extends ListParams {
 export interface Usage {
   from: string;
   to: string;
+  /** Sessions created in the period. */
   sessions: number;
+  /** Sessions running now. */
   running: number;
+  /** The plan's concurrent sessions. */
+  concurrencyLimit: number;
+  /** Agent runs started in the period. */
+  agentRuns: number;
+  /** List-price model cost of runs on the platform's model keys. */
+  modelCostUsd: number;
+  /** List-price model cost of runs on the project's own model keys (not charged by Boxline). */
+  ownKeyModelCostUsd: number;
   browserSeconds: number;
   sandboxVcpuSeconds: number;
   sandboxGibSeconds: number;
@@ -1620,24 +1640,16 @@ export interface Usage {
   searches: { count: number; costUsd: number };
   /** Includes proxy data, CAPTCHA solving and searches beyond the allowance. */
   costUsd: number;
-  byDay: { date: string; seconds: number; costUsd: number }[];
-}
-
-export interface StatsDay {
-  sessions: number;
-  browserSeconds: number;
-  costUsd: number;
-  agentRuns: number;
-  /** Model cost on the platform's keys (runs on the project's own keys are in `ownKeyModelCostUsd`). */
-  modelCostUsd: number;
-  ownKeyModelCostUsd: number;
-}
-export interface Stats {
-  days: number;
-  running: number;
-  concurrencyLimit: number;
-  totals: StatsDay;
-  byDay: (StatsDay & { date: string })[];
+  /** One entry per day with activity (UTC); a day with nothing is left out. */
+  byDay: {
+    date: string;
+    sessions: number;
+    seconds: number;
+    costUsd: number;
+    agentRuns: number;
+    modelCostUsd: number;
+    ownKeyModelCostUsd: number;
+  }[];
 }
 
 export interface Pricing {
@@ -1749,6 +1761,8 @@ export interface WebhookUpdateParams {
   /** true also after the platform switched it off (and forgets its failures); false: deliveries not yet made fail. */
   enabled?: boolean;
   description?: string | null;
+  /** A new signing secret, shown once in the answer (`secret`); the old one keeps signing for 24 hours. */
+  rotateSecret?: boolean;
 }
 
 /** Why a delivery or an attempt failed (null when delivered); the last five are deliveries that were never sent. */
@@ -1843,7 +1857,6 @@ export interface WebhookAgentRunStartedData {
   provider: AgentProvider;
   model: string;
   mode: AgentMode;
-  continuedFrom: string | null;
   taskId: string | null;
   taskRunId: string | null;
   createdAt: string;
@@ -1854,11 +1867,11 @@ export interface WebhookAgentRunWaitingData {
   id: string;
   sessionId: string | null;
   state: "waiting";
-  /** "agent": it asked for help; "user": someone took over; "captcha": a CAPTCHA needs a person. */
+  /** "agent": it asked for help; "user": a person paused it; "captcha": a CAPTCHA needs a person. */
   by: "agent" | "user" | "captcha";
   /** At most 500 characters, with variables as their %name%. */
   reason: string | null;
-  /** The run in the console (a login is needed). The signed live view is never sent: get it with sessions.live(). */
+  /** The run in the console (a login is needed). The signed live view is never sent: get it with sessions.get(). */
   consoleUrl: string;
   since: string;
 }
@@ -1867,10 +1880,10 @@ export interface WebhookAgentRunResumedData {
   id: string;
   sessionId: string | null;
   state: "resumed";
-  /** What it waited for, as in agent_run.waiting. */
-  by: "agent" | "user" | "captcha";
-  /** "handback": a person handed back; "message": a message answered its request for help; "solved": the CAPTCHA was solved. */
-  via: "handback" | "message" | "solved";
+  /** What it waited for, as in agent_run.waiting; "limit": it stopped early (steps, cost, errors, a restart) and was resumed. */
+  by: "agent" | "user" | "captcha" | "limit";
+  /** "resume": a person resumed a paused run, or a run that stopped early was resumed (`agent.resume`); "message": a message answered its request for help; "solved": the CAPTCHA was solved or went away. */
+  via: "resume" | "message" | "solved";
   at: string;
 }
 
@@ -1886,9 +1899,9 @@ export interface WebhookAgentRunFinishedData {
   structured: boolean;
   error: string | null;
   errorCode: string | null;
-  continuable: { until: string } | null;
-  continuedFrom: string | null;
-  /** The names of the run's own variables (never values): continuing it needs their values again. */
+  /** Set when the run stopped early and can be resumed (`agent.resume`) until then. */
+  resumable: { until: string } | null;
+  /** The names of the run's own variables (never values): resuming it needs their values again. */
   variableNames: string[];
   messages: number;
   usage: { inputTokens: number; outputTokens: number; costUsd: number | null };
@@ -2146,7 +2159,7 @@ export type Credential = PasswordCredential | SecretCredential;
 /**
  * A credential as `credentials.create` and `credentials.update` return it: when `codeUrl` was set or changed it also
  * has `codeUrlSecret` (`whsec_…`), the key that signs the platform's requests to `codeUrl`, shown this once (a new one
- * any time with `credentials.rotateCodeUrlSecret`).
+ * any time with `credentials.update(name, { rotateCodeUrlSecret: true })`).
  */
 export type CredentialWritten<C extends Credential = Credential> = C & { codeUrlSecret?: string };
 
@@ -2218,6 +2231,8 @@ export interface PasswordCredentialUpdateParams {
   totpSecret?: string | null;
   /** The endpoint asked for codes ("url"). Needs `password` again; the answer has a new `codeUrlSecret`. */
   codeUrl?: string;
+  /** A new `codeUrlSecret` now (shown once in the answer; the old one stops at once). For a password with `codeSource` "url". */
+  rotateCodeUrlSecret?: boolean;
   /** 5 to 900 seconds. */
   codeTimeoutSeconds?: number;
   /** null clears it. */
@@ -2242,6 +2257,7 @@ export interface SecretCredentialUpdateParams {
   password?: never;
   codeSource?: never;
   codeUrl?: never;
+  rotateCodeUrlSecret?: never;
   codeTimeoutSeconds?: never;
   totpSecret?: never;
 }

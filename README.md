@@ -17,12 +17,14 @@ Node 18 or newer (it uses the global `fetch`). The client also works in browsers
 instead of an API key, on the platform's own sites.
 
 - [Sessions and Playwright](#sessions-and-playwright)
-- [Browser, shell and files together](#browser-shell-and-files-together)
+- [Browser, shell or both](#browser-shell-or-both)
+- [Change a running session](#change-a-running-session)
+- [Files, also after a session stops](#files-also-after-a-session-stops)
 - [The page APIs](#the-page-apis)
 - [Web search](#web-search)
 - [Mouse, keyboard and computer use](#mouse-keyboard-and-computer-use)
 - [An agent run with variables](#an-agent-run-with-variables)
-- [Limits, Continue and messages](#limits-continue-and-messages)
+- [Pause, resume, limits and messages](#pause-resume-limits-and-messages)
 - [Tasks and structured output](#tasks-and-structured-output)
 - [Credentials and browser profiles](#credentials-and-browser-profiles)
 - [A script with useModel](#a-script-with-usemodel)
@@ -53,15 +55,31 @@ const { title, content } = await session.content("markdown");
 await session.stop();
 ```
 
-`session.liveUrl` is a page where a person can watch and take over. `session.stop()` saves the whole browser (every
+`session.liveUrl` is a page where a person can watch the browser and use it. `session.stop()` saves the whole browser (every
 tab, cookies, storage) and the files, frees the machine and stops billing; `session.resume()` brings it back, same id, as
 it was. A stopped session is kept for your plan's `retentionDays` (`session.data.deletesAt`), then deleted;
 `session.delete()` deletes it now, with its recording and logs.
 
-## Browser, shell and files together
+## Browser, shell or both
 
-One session has a browser, a shell and a disk they share: browser downloads land in `<workspace>/downloads`, the shell
-starts in the workspace, and the files API reads and writes it.
+A session is one isolated machine with a disk, and you choose what it has: a **browser** (the default), a **shell**, or
+both. `browser` (default `true`) and `shell` (default `false`) pick the kind; a session needs at least one.
+
+```ts
+await bx.sessions.create();                                  // a browser
+await bx.sessions.create({ browser: false, shell: true });   // a shell only: no live view, no connectUrl
+await bx.sessions.create({ shell: true });                   // both, sharing /workspace
+```
+
+`session.liveUrl` and `session.connectUrl` are `null` without a browser, `session.terminalUrl` is `null` without a shell.
+A browser call (`actions`, `computer`, `runScript`, `exportCookies`, and every `session.goto()`-style method) on a shell-only
+session throws `BrowserDisabledError` (409 `browser_disabled`); a shell call on a session without a shell throws
+`ShellDisabledError` (409 `shell_disabled`). Files, events and the rest work on every kind. Agent runs and tasks take the
+same settings as a `session` (a `SessionSpec`, the type `sessions.create` takes): `bx.agent.run({ task, session: { browser: false, shell: true } })`
+is a shell-only run.
+
+One session with both has a browser, a shell and a disk they share: browser downloads land in `<workspace>/downloads`,
+the shell starts in the workspace, and the files API reads and writes it.
 
 ```ts
 const s = await bx.sessions.create({ shell: true });
@@ -82,9 +100,44 @@ await s.actions([{ action: "fill", selector: "#total", value: total }, { action:
 await s.stop();
 ```
 
-The same mix works inside an agent run (`shell: true`: the agent uses `browser_*` tools and `bash`) and inside a
+The same mix works inside an agent run (`session: { shell: true }`: the agent uses `browser_*` tools and `bash`) and inside a
 script (`require("child_process")` and `require("fs")` next to `page` and `step()`): see
 [agent-mixed.ts](examples/agent-mixed.ts) and [script-mixed.ts](examples/script-mixed.ts).
+
+## Change a running session
+
+`session.update(patch)` (or `bx.sessions.update(id, patch)`) is the one call that changes a running session, with the
+field names and shapes `create` has, and the session as its answer:
+
+```ts
+await session.update({ timeout: 900 });          // its length in seconds from its last start (expiresAt moves with it)
+await session.update({ proxy: { type: "residential", country: "DE" }, blockAds: true, captcha: "ask" });
+await session.update({ rotateProxy: true });     // a new proxy IP now (400 without a proxy)
+await session.update({ rotateUrls: true });      // new connectUrl, liveUrl, terminalUrl: every earlier one stops working
+await session.update({ proxy: null, idleTimeout: null, userMetadata: { job: "42" } });
+```
+
+What is fixed when the session is created (`browser` or `shell` on or off, `viewport`, `profile`, `recordSession`, `setup`,
+`extensions`, `env`, `credentials`) throws `NotUpdatableError` (400 `not_updatable`) naming the field. A session that is
+not running throws `SessionNotRunningError`. There is no `extend`, `rotateProxy`, `rotateUrls`, `live` or `move` method:
+`update` and `sessions.get(id)` (which returns fresh signed URLs every time) do those jobs.
+
+## Files, also after a session stops
+
+Every kind of session has a `/workspace`. Besides `list`, `read`, `write`, `delete` and `waitFor`, `files.archive` returns a
+whole folder as one `.tar.gz` (the bytes): everything an agent made, in one call.
+
+```ts
+const tgz = await session.files.archive("results");   // or archive() for the whole workspace
+await fs.promises.writeFile("results.tar.gz", tgz);
+```
+
+`list`, `read` and `archive` also work on a **stopped** session, read-only, without starting a machine, until the session is
+deleted: they are served from the workspace it saved (`NothingSavedError`, 409 `nothing_saved`, when it saved none).
+`write`, `delete`, `waitFor` and commands still need it running (`SessionNotRunningError`). The archive leaves out `.boxline/`,
+stores links as links (never follows them), and is limited to 1 GiB and 100,000 entries (`ArchiveTooLargeError`, 413);
+`NotADirectoryError` (400) for a file, `InvalidPathError` for a path outside the workspace, `ArchiveBusyError` (429) when
+two archives of the session are already being made.
 
 ## The page APIs
 
@@ -175,29 +228,38 @@ for await (const event of bx.agent.stream(run.id)) {
 }
 ```
 
-`agent.takeover(id)` and `agent.handBack(id, note)` hand the browser to a person and back; `agent.wait(id)` polls
-until the run ends.
+The run's own session is described by `session`, a `SessionSpec` (the type `sessions.create` takes): `session: { proxy: true,
+captcha: "solve", profile: { id }, timeout: 900 }`, or `session: { browser: false, shell: true }` for a shell-only run (its
+tools follow the session). `sessionId` works in an existing session instead; both together are a 400. The flat session fields
+(`browser`, `shell`, `proxy`, `captcha`, `blockAds`, `cookieBanners`, `extensions`, `profile`, `timeout`, `idleTimeout`)
+are not run parameters any more: they go inside `session`. `agent.wait(id)` polls until the run ends.
 
-## Limits, Continue and messages
+## Pause, resume, limits and messages
+
+`agent.pause(id)` makes the agent finish its current action and wait (status `paused`), so a person can act in the live view
+or the terminal (a CAPTCHA, a 2FA code, a choice); it works on every kind of run. `agent.resume(id, { note })` goes on: it is
+the **same run** (one job, one run id; steps and usage add up), and the agent is told a person had control, plus your `note`.
 
 A run stops at the first of its limits: `maxSteps` (default 30; `null` for none), `maxCostUsd` (optional, model cost
 in USD), `maxConsecutiveErrors` tool errors in a row (default 5), the same call with the same result 5 times, or its
-session's time (`timeout`, for the run's own session). At a step, cost, error or no-progress limit it ends with an
+session's time (`session.timeout`, for the run's own session). At a step, cost, error or no-progress limit it ends with an
 `errorCode` (`max_steps`, `max_cost`, `too_many_errors`, `no_progress`), `resultText` says what is done and what is
-left, and `continuable.until` says how long it can be continued: its session is kept for 10 minutes.
+left, and `resumable.until` says how long it can be resumed: its session is kept for 10 minutes. `resume` is the same call
+for that:
 
 ```ts
-const run = await bx.agent.run({ task: "Turn every video in the workspace into 30-second clips", shell: true, maxSteps: 20, maxCostUsd: 2 });
+const run = await bx.agent.run({ task: "Turn every video in the workspace into 30-second clips", session: { shell: true }, maxSteps: 20, maxCostUsd: 2 });
 let done = await bx.agent.wait(run.id);
-if (done.continuable) {
+if (done.resumable) {
   console.log(done.resultText); // what is done, what is left
-  const next = await bx.agent.continueRun(done.id, { maxSteps: 30, instruction: "The downloads are done; do the clips." });
-  done = await bx.agent.wait(next.id); // next.continuedFrom === done.id, same session
+  await bx.agent.resume(done.id, { maxSteps: 30, note: "The downloads are done; do the clips." });
+  done = await bx.agent.wait(run.id); // the same run, in the same session
 }
 ```
 
-A run that had `variables` needs them again on `continueRun` (their values are never stored). `NotContinuableError`:
-the run did not stop at a limit, was continued already, or its window passed.
+A run that had `variables` needs them again on `resume` (their values are never stored). `NotResumableError`
+(409 `not_resumable`): the run is neither paused nor stopped early, or its window passed. `RunNotLiveError`: the API server running
+it stopped; resume it once it shows as failed with `server_restarted`.
 
 Tell a working run something without taking the browser: it reads the message at its next step, and a run waiting for
 your help (`ask_user_for_help`) takes it as the answer.
@@ -208,8 +270,9 @@ await bx.agent.sendMessage(run.id, "Also open page C and include its heading in 
 
 ## Tasks and structured output
 
-A task is a saved agent run: an instruction with `%name%` variables, an output schema, browser settings, a profile,
-a model and, if you like, a schedule. Run it by hand or on its schedule; every run is an agent run.
+A task is a saved agent run: an instruction with `%name%` variables, an output schema, the `session` each run starts
+with (a `SessionSpec`: browser, shell or both, proxy, profile, timeout…), a model and, if you like, a schedule. Run it by
+hand or on its schedule; every run is an agent run.
 
 ```ts
 interface Books { category: string; books: { title: string; price: number }[] }
@@ -226,6 +289,7 @@ const task = await bx.tasks.create({
     },
     required: ["category", "books"],
   },
+  session: { browser: { locale: "en-GB" }, blockAds: true },   // or { browser: false, shell: true } for a shell-only task
   schedule: { cron: "0 9 * * MON-FRI", timezone: "Europe/London", enabled: false },
 });
 
@@ -243,6 +307,9 @@ await bx.tasks.update(task.id, { schedule: { enabled: true } });  // null remove
 - **Variables**: plain ones are written into the instruction (and kept with the run); `{ name, secret: true, origins }`
   is never stored, must come with every run, and is typed without the model seeing it. A task with a secret variable
   cannot have a schedule. A run missing a value throws `MissingVariablesError`.
+- **Session**: `session` replaces the former `browser` and `profile` fields (a browser profile is `session.profile`);
+  `allowWithExtensions` is the task's own field. `session.env` is stored sealed and read back as names only;
+  `tasks.update(id, { session: null })` removes it.
 - **Credentials**: `credentials: ["SHOP"]` on `tasks.create` gives every run the saved credentials' placeholders (see
   [Credentials and browser profiles](#credentials-and-browser-profiles)); a scheduled task may use them, and the task
   keeps the names only.
@@ -334,8 +401,8 @@ const page = await s.login("SHOP", { url: "https://shop.example.com/login" });  
 - A pushed code or link is used once, by a wait that began before it arrived, and kept sealed for 10 minutes. A link must
   be on one of the credential's sites. `pushCode` is not retried by the SDK (a second push is a second code).
 - With `codeSource: "url"` the platform asks your `codeUrl` every 5 s while a run waits (a signed POST; check it with
-  `verifyWebhook` and the `codeUrlSecret` that `create` and `update` return once; `credentials.rotateCodeUrlSecret(name)`
-  makes a new one). Answer `{code}` or `{link}`, or 204 for "not yet".
+  `verifyWebhook` and the `codeUrlSecret` that `create` and `update` return once; `credentials.update(name, {
+  rotateCodeUrlSecret: true })` makes a new one, shown once; the old one stops at once). Answer `{code}` or `{link}`, or 204 for "not yet".
 - Without a code in time a step, action or `login` throws `CredentialCodeTimeoutError`.
 
 ## A script with useModel
@@ -382,7 +449,7 @@ await s.goto("https://example.com");
 await s.refresh();
 console.log(s.data.blockedRequests); // refused inside the machine, before any proxy (collected about every 30 s)
 await s.update({ blockAds: false, cookieBanners: "off" });
-await bx.fetch("https://example.com", { blockAds: true }); // screenshot, pdf, extract, crawl.start and agent.run take it too
+await bx.fetch("https://example.com", { blockAds: true }); // screenshot, pdf, extract and crawl.start take it too; agent runs and tasks take it inside `session`
 ```
 
 Chrome extensions (Manifest V3, plan feature `extensions`): upload the zip of the extension's folder once, then start
@@ -432,7 +499,7 @@ try {
 
 - The signature's timestamp must be within 5 minutes of your clock (`{toleranceSeconds}` changes it), which stops
   replays of old deliveries.
-- `bx.webhooks.rotateSecret(id)` returns a new secret; for 24 hours deliveries are signed with both, so switch at your
+- `bx.webhooks.update(id, { rotateSecret: true })` returns the endpoint with a new `secret`; for 24 hours deliveries are signed with both, so switch at your
   pace. `verifyWebhook` takes a list too: `[newSecret, oldSecret]`.
 - `bx.webhooks.test(id)` sends a `webhook.test` event now; `bx.webhooks.test(id, {type: "agent_run.waiting"})` sends a
   made-up sample of that type (marked `test: true`). `bx.webhooks.deliveries(id, {status: "failed"})` lists
@@ -472,11 +539,12 @@ Lists: `sessions.list`, `sessions.events`, `sessions.pages`, `profiles.list`, `a
   `InvalidExtensionError`, `PayloadTooLargeError`, `LimitReachedError`, `ExtensionDeniedError`, `CrossSiteRequestError`,
   `MissingVariablesError`, `PlanLimitError`, `CredentialExistsError`, `CredentialNotAllowedError`, `TooManyCredentialValuesError`,
   `CredentialCodeTimeoutError`, `CredentialLinkWrongSiteError`, `CredentialLoginFailedError`, `CodeUrlNotAllowedError`,
-  `MachineTooOldError`, `NotContinuableError`, `TooManyMessagesError`, `SessionNotRunningError`, `NothingSavedError`, `AuthenticationError`,
-  `NotFoundError`, and
+  `MachineTooOldError`, `NotResumableError`, `TooManyMessagesError`, `RunNotLiveError`, `SessionNotRunningError`, `NothingSavedError`,
+  `BrowserDisabledError`, `ShellDisabledError`, `NotUpdatableError`, `ArchiveTooLargeError`, `ArchiveBusyError`, `InvalidPathError`,
+  `NotADirectoryError`, `AuthenticationError`, `NotFoundError`, and
   `BoxlineConnectionError` /
   `BoxlineTimeoutError` when no answer came back. `ErrorCode` has the codes.
-- **Retries.** GETs, and the calls that create or start something (sessions, bulk, agent runs, continued runs, messages
+- **Retries.** GETs, and the calls that create or start something (sessions, bulk, agent runs, resumed runs, messages
   to runs, crawls, API keys, profiles, extension uploads, tasks, task runs), are retried after a network error, a time-out, 429 and 5xx: 2 retries by default, exponential backoff
   from 0.5 s to 8 s with jitter, or what `Retry-After` / `RateLimit-Reset` say (up to 60 s; longer waits go to you as a
   `RateLimitError`). Other POSTs (exec, actions, fetch…) are never retried: they could run twice.
@@ -503,20 +571,20 @@ same methods without it (`session.stop()`).
 
 | Area | Methods |
 |---|---|
-| Account | `me`, `hasFeature`, `auth.signup`, `auth.login`, `auth.logout`, `project.trajectories`, `project.setTrajectories`, `project.settings`, `project.setSettings`, `apiKeys.list`, `apiKeys.create`, `apiKeys.revoke` |
-| Webhooks | `webhooks.create`, `list`, `get`, `update`, `delete`, `rotateSecret`, `test`, `deliveries`, `retryDelivery`; `verifyWebhook` (no request) |
-| Sessions | `sessions.create`, `get`, `list`, `update`, `stop`, `resume`, `delete`, `move`, `extend`, `rotateProxy`, `rotateUrls`, `live`, `bulk` |
+| Account | `me`, `hasFeature`, `auth.signup`, `auth.login`, `auth.logout`, `project.settings`, `project.setSettings` (both with `trajectories`), `apiKeys.list`, `apiKeys.create`, `apiKeys.revoke` |
+| Webhooks | `webhooks.create`, `list`, `get`, `update` (also `rotateSecret`), `delete`, `test`, `eventTypes`, `deliveries`, `retryDelivery`; `verifyWebhook` (no request) |
+| Sessions | `sessions.create`, `get`, `list`, `update` (also `timeout`, `rotateProxy`, `rotateUrls`), `stop`, `resume`, `delete`, `bulk` |
 | Browser | `sessions.actions`, `sessions.computer`; on a session: `goto`, `click`, `hover`, `fill`, `type`, `typeCredential`, `press`, `scroll`, `wait`, `select`, `elements`, `evaluate`, `content`, `screenshot`, `cursor`, `upload`, `tabs`, `newTab`, `switchTab`, `closeTab`, `back`, `forward`, `reload`, `step`, `extract`, `exportCookies`, `computer`, `mouse.move`/`moveBy`/`click`/`down`/`up`/`drag`, `keyboard.key`/`type`/`press` |
 | Shell and scripts | `sessions.exec`, `execStream`, `runScript`, `restartShell` |
-| Files | `sessions.files.list`, `read`, `readText`, `write`, `delete`, `waitFor` |
+| Files | `sessions.files.list`, `read`, `readText`, `archive`, `write`, `delete`, `waitFor` |
 | Logs | `sessions.events`, `streamEvents`, `pages`, `recording`, `recordingFrame`; on a session: `waitForHuman`, `onCaptcha` |
 | Browser profiles | `profiles.create`, `get`, `list`, `update`, `delete` |
-| Credentials | `credentials.create`, `list`, `get`, `update`, `delete`, `audit`, `pushCode`, `rotateCodeUrlSecret`; on a session: `typeCredential`, `login` |
+| Credentials | `credentials.create`, `list`, `get`, `update` (also `rotateCodeUrlSecret`), `delete`, `audit`, `pushCode`; on a session: `typeCredential`, `login` |
 | Extensions | `extensions.upload`, `list`, `get`, `delete` |
 | Web | `fetch`, `screenshot`, `pdf`, `extract`, `search`, `crawl.start`, `get`, `list`, `cancel`, `pages`, `wait` |
-| Agent | `agent.models`, `run`, `get`, `list`, `takeover`, `handBack`, `cancel`, `continueRun`, `sendMessage`, `stream`, `wait` |
+| Agent | `agent.models`, `run`, `get`, `list`, `pause`, `resume`, `cancel`, `sendMessage`, `stream`, `wait` |
 | Tasks | `tasks.create`, `list`, `get`, `update`, `delete`, `run`, `runs`, `waitForRun` |
-| Usage | `usage`, `stats`, `pricing`, `openapi`, `health` |
+| Usage | `usage` (with what `stats` had), `pricing`, `openapi`, `health` |
 
 ## Examples
 

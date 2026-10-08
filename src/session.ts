@@ -23,7 +23,6 @@ import type {
   GotoResult,
   PageContent,
   PageElements,
-  ProxyOption,
   Recording,
   RunScriptOptions,
   ScreenshotValue,
@@ -31,7 +30,6 @@ import type {
   SessionData,
   SessionEvent,
   SessionEventsParams,
-  SessionUrls,
   StepOptions,
   StepResult,
   TabList,
@@ -40,7 +38,6 @@ import type {
   WaitUntil,
   ListParams,
   MouseButton,
-  MoveTimings,
   Point,
 } from "./types.js";
 
@@ -66,7 +63,7 @@ export interface ClickOptions {
 
 /**
  * One session: a machine with a browser and/or a shell and a shared /workspace disk. `data` is the session as the
- * API last returned it; lifecycle calls (stop, resume, update, extend, …) refresh it.
+ * API last returned it; lifecycle calls (stop, resume, update, refresh, …) refresh it.
  */
 export class Session {
   private declare readonly client: Boxline;
@@ -84,13 +81,15 @@ export class Session {
   get status() {
     return this.data.status;
   }
-  /** WebSocket URL for Playwright/Puppeteer `connectOverCDP`. Treat it like a password. */
+  /** WebSocket URL for Playwright/Puppeteer `connectOverCDP`; null without a browser. Treat it like a password. */
   get connectUrl() {
     return this.data.connectUrl;
   }
+  /** The live view page; null without a browser. Treat it like a password. */
   get liveUrl() {
     return this.data.liveUrl;
   }
+  /** The terminal WebSocket; null without a shell. Treat it like a password. */
   get terminalUrl() {
     return this.data.terminalUrl;
   }
@@ -105,6 +104,7 @@ export class Session {
 
   // ----- lifecycle
 
+  /** Reads the session again (also fresh signed `connectUrl`, `liveUrl` and `terminalUrl`). */
   async refresh(options?: RequestOptions) {
     return this.set(await this.client.sessions.get(this.id, options));
   }
@@ -121,39 +121,14 @@ export class Session {
     return this.set(await this.client.sessions.delete(this.id, options));
   }
   /**
-   * Makes the current connectUrl, liveUrl and terminalUrl stop working (use it if one leaked) and closes
-   * connections made with them; the session gets fresh URLs.
+   * Changes the running session with the field names and shapes `sessions.create` has: `keepAlive`, `timeout` (its length in
+   * seconds from its last start), `idleTimeout`, `userMetadata`, `proxy` (`null` removes it), `captcha`, `browser` settings,
+   * `blockAds`, `cookieBanners`, plus `rotateProxy: true` (a new proxy IP now) and `rotateUrls: true` (the current
+   * connectUrl, liveUrl and terminalUrl stop working and the session gets fresh ones). The fields fixed at create throw
+   * NotUpdatableError.
    */
-  async rotateUrls(options?: RequestOptions) {
-    return this.set(await this.client.sessions.rotateUrls(this.id, options));
-  }
-  /** Changes keepAlive, userMetadata, the proxy, the captcha option or the browser settings. */
   async update(patch: UpdateSessionParams, options?: RequestOptions) {
     return this.set(await this.client.sessions.update(this.id, patch, options));
-  }
-  /** Sets, changes or (null) removes the session's proxy; new connections use it right away. */
-  async setProxy(proxy: ProxyOption | null, options?: RequestOptions) {
-    return this.update({ proxy }, options);
-  }
-  /** A new IP for the session's proxy (sticky sessions keep one IP until this is called). */
-  async rotateProxy(options?: RequestOptions) {
-    return this.set(await this.client.sessions.rotateProxy(this.id, options));
-  }
-  /** Adds time (60–3600 s), up to the plan's maximum session length. */
-  async extend(seconds: number, options?: RequestOptions) {
-    return this.set(await this.client.sessions.extend(this.id, seconds, options));
-  }
-  /** Moves the live session to a fresh machine; reconnect to the same connectUrl afterwards. Returns the timings. */
-  async move(options?: RequestOptions): Promise<MoveTimings> {
-    const r = await this.client.sessions.move(this.id, options);
-    this.data = r.session.data;
-    return r.timings;
-  }
-  /** Fresh signed URLs (also stored on this object). */
-  async live(options?: RequestOptions): Promise<SessionUrls> {
-    const urls = await this.client.sessions.live(this.id, options);
-    this.data = { ...this.data, ...urls };
-    return urls;
   }
 
   /**
@@ -208,7 +183,7 @@ export class Session {
 
   // ----- logs and recording
 
-  /** Console, network, navigation, error, lifecycle, action, exec and captcha events (oldest first). */
+  /** Console, network, navigation, error, lifecycle, action, exec (`data.by`, `data.runId`) and captcha events (oldest first). */
   events(params: SessionEventsParams = {}, options?: RequestOptions): PagePromise<SessionEvent, Page<SessionEvent> & { nextAfter: number }> {
     return this.client.sessions.events(this.id, params, options);
   }
@@ -404,10 +379,6 @@ export class Session {
   exportCookies(path?: string, options?: RequestOptions) {
     return this.client.sessions.exportCookies(this.id, path, options);
   }
-  /** @deprecated Use session.exportCookies(). */
-  readonly browser = {
-    exportCookies: (path?: string, options?: RequestOptions) => this.exportCookies(path, options),
-  };
 
   // ----- shell
 
@@ -431,16 +402,18 @@ export class Session {
   restartShell(name?: string, options?: RequestOptions): Promise<void> {
     return this.client.sessions.restartShell(this.id, name, options);
   }
-  /** @deprecated Use session.restartShell(). */
-  readonly shell = {
-    restart: (name?: string, options?: RequestOptions) => this.restartShell(name, options),
-  };
 
   // ----- files in /workspace
 
+  /**
+   * Files in the session's /workspace. `list`, `read` and `archive` also work on a stopped session (read-only, no machine
+   * started); `write`, `delete` and `waitFor` need it running.
+   */
   readonly files = {
     list: (path = ".", options?: RequestOptions): Promise<FileList> => this.client.sessions.files.list(this.id, path, options),
     read: (path: string, options?: RequestOptions): Promise<Uint8Array> => this.client.sessions.files.read(this.id, path, options),
+    /** A folder (default: the whole workspace) and everything in it as one `.tar.gz`. */
+    archive: (path?: string, options?: RequestOptions): Promise<Uint8Array> => this.client.sessions.files.archive(this.id, path, options),
     readText: (path: string, options?: RequestOptions): Promise<string> => this.client.sessions.files.readText(this.id, path, options),
     write: (path: string, data: string | Uint8Array | Blob, options?: RequestOptions): Promise<FileRef> => this.client.sessions.files.write(this.id, path, data, options),
     delete: (path: string, options?: RequestOptions): Promise<void> => this.client.sessions.files.delete(this.id, path, options),

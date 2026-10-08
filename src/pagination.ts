@@ -13,7 +13,7 @@ export class Page<T> implements AsyncIterable<T> {
   readonly #load: (after: string) => Promise<Page<T>>;
 
   constructor(body: { data: T[]; next?: string | null } & Record<string, unknown>, load: (after: string) => Promise<Page<T>>) {
-    // Other fields of the list (total, limit, offset, nextAfter) are kept as they are.
+    // Other fields of the list (total, limit, nextAfter) are kept as they are.
     Object.assign(this, body);
     this.data = body.data;
     this.next = typeof body.next === "string" && body.next !== "" ? body.next : null;
