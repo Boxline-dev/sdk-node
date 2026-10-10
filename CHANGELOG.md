@@ -2,7 +2,7 @@
 
 All notable changes to `@boxline/sdk`. The SDK follows [semantic versioning](https://semver.org).
 
-## Unreleased
+## 3.1.1 (2026-10-10)
 
 The Claude 5.5 models: `claude-opus-5-5` (the default), `claude-sonnet-5-5` and `claude-haiku-5-5` replace Claude Opus 5,
 Sonnet 5 and Haiku 4.5 on the API (model ids are strings, so code that names a model keeps compiling; the old ids are
