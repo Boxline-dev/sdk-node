@@ -15,7 +15,7 @@ const bx = new Boxline();
 const catalog = await bx.agent.models();
 const provider = catalog.providers.find((p) => p.available);
 if (!provider) throw new Error("no model provider is configured on this server");
-const fast = provider.id === "anthropic" ? "claude-haiku-4-5" : "gpt-6-luna";
+const fast = provider.id === "anthropic" ? "claude-haiku-5-5" : "gpt-6-luna";
 
 // The script runs with Node inside the session, next to its browser; page, step() and useModel() are in scope.
 const code = String.raw`

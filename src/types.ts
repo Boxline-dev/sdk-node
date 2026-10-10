@@ -626,8 +626,8 @@ export interface ScreenshotValue {
 // ---------------------------------------------------------------- computer use
 
 /**
- * The input of a tool_use block of Claude's `computer` tool (computer_20250124, computer_20251124), as the model
- * gives it. Coordinates are screenshot pixels.
+ * One action of Claude's computer toolset (`computer_toolset_20260801`): the tool_use block's `name` as `action`,
+ * plus its `input`. Coordinates are screenshot pixels.
  */
 export interface AnthropicComputerAction {
   action:
@@ -657,6 +657,8 @@ export interface AnthropicComputerAction {
   scroll_amount?: number;
   duration?: number;
   region?: [number, number, number, number];
+  /** key: how many times to press the keys (1–100, default 1). */
+  repeat?: number;
 }
 
 /** One item of an OpenAI computer_call's `actions` (GA `computer` tool). Coordinates are screenshot pixels. */
@@ -1179,7 +1181,7 @@ export interface AgentModelCatalog {
       /** Agent runs with mode "computer" work with this model. */
       supportsComputerUse: boolean;
       /** The computer-use tool the model gets in mode "computer" (Anthropic tool version, or OpenAI's "computer"). */
-      computerTool: "computer_20251124" | "computer_20250124" | "computer" | null;
+      computerTool: "computer_toolset_20260801" | "computer" | null;
       default: boolean;
     }[];
   }[];
@@ -1244,7 +1246,7 @@ export interface AgentRunParams {
   credentials?: string[];
   /** "anthropic" or "openai"; defaults to the first configured provider. */
   provider?: AgentProvider;
-  /** e.g. "claude-opus-5", "claude-sonnet-5", "gpt-6-sol"; defaults to the provider's default model. */
+  /** e.g. "claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-sol"; defaults to the provider's default model. */
   model?: string;
   /**
    * "computer": the model drives the page with its provider's own computer-use tool on screenshots (models with

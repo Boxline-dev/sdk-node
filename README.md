@@ -413,10 +413,10 @@ const page = await s.login("SHOP", { url: "https://shop.example.com/login" });  
 ```ts
 const s = await bx.sessions.create({ shell: true });
 const { stdout, exitCode } = await s.runScript(`
-  useModel("claude-haiku-4-5");                  // every later step() and extract() uses it
+  useModel("claude-haiku-5-5");                  // every later step() and extract() uses it
   await page.goto("https://example.com/signup");
   await step("type %email% into the email field");
-  await step("click Continue", { model: "claude-sonnet-5" }); // this call only
+  await step("click Continue", { model: "claude-sonnet-5-5" }); // this call only
   const plans = await extract("the plan names and prices");   // returns the data itself
   console.log(JSON.stringify(plans));
 `, { env: { email: "ada@example.com" }, onData: (_stream, text) => process.stdout.write(text) });
