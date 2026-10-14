@@ -2,15 +2,20 @@
 
 All notable changes to `@boxline/sdk`. The SDK follows [semantic versioning](https://semver.org).
 
-## Unreleased
+## 3.2.0 (2026-10-14)
+
+Types for what the API already returns, and `runScript` that waits for setup. Additions only; nothing breaks.
+
+### Added
+
+- `ProjectSettingsData`: the settings data type, exported under a name the `ProjectSettings` class does not shadow.
+- `Plan.maxCrawlPages` and `ApiKeyInfo.createdBy`, which the API already returns.
 
 ### Fixed
 
 - `runScript` no longer times out while the session's setup commands run: it allows for setup in its time limit (like
   `exec`), and an error line in the script's stream now throws (it was ignored, so a script that never started looked
   like one with no exit code).
-- `ProjectSettingsData`: the settings data type, exported under a name the `ProjectSettings` class does not shadow.
-- `Plan.maxCrawlPages` and `ApiKeyInfo.createdBy`, which the API already returns.
 - Comments: `CrawlParams.maxPages` goes up to the plan's `maxCrawlPages` (1000 on paid plans), not 200; `exec` keeps the
   first 64 KiB and last 448 KiB of each stream; `login`'s default `url` is the first site without `*.` and it needs
   `agentRuns` too; `Session.runScript` needs a browser and a shell; `AgentRunParams.provider` takes four providers and
