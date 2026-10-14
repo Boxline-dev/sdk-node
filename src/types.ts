@@ -90,6 +90,8 @@ export interface Plan {
   webhookEndpoints: number | null;
   /** Days an ended session's recording, logs and agent-run steps are kept (then deleted; the session stays). */
   retentionDays: number;
+  /** The most pages one crawl may ask for (Free 200, paid plans 1000). */
+  maxCrawlPages?: number;
   /** Tasks a project may have; null = no plan limit (1,000 per project at most). */
   tasks?: number | null;
   /** Tasks with a schedule switched on; 0 = no schedules, null = no limit. */
@@ -194,6 +196,8 @@ export interface ApiKeyInfo {
   prefix: string;
   createdAt: string;
   lastUsedAt: string | null;
+  /** Who made it (in a list; null for keys made before it was recorded). `support`: the platform's staff acting as a user, never named. */
+  createdBy?: { via: "console" | "api_key" | "support"; userId: string | null; email: string | null; apiKeyId: string | null } | null;
 }
 export interface NewApiKey {
   id: string;
@@ -836,7 +840,10 @@ export interface RunScriptOptions {
 
 export interface FileEntry {
   name: string;
-  /** `symlink`: a link, never followed (it is not downloadable). */
+  /**
+   * A running session's listing follows links (a link shows as what it points to); `symlink` comes only from a stopped
+   * session's saved workspace, where a link is never followed (and not downloadable).
+   */
   type: "file" | "dir" | "symlink" | "other";
   size: number;
   /** ISO date. */
@@ -1107,7 +1114,7 @@ export interface CrawlParams {
   /** Sticky by default: one IP per crawl. */
   proxy?: ProxyOption;
   browser?: boolean | BrowserOptions;
-  /** 1–200, default 20. */
+  /** Default 20, up to the plan's `maxCrawlPages` (Free 200, paid plans 1000); 402 `plan_limit` beyond. */
   maxPages?: number;
   /** 0–10, default 3. */
   maxDepth?: number;
@@ -1244,7 +1251,7 @@ export interface AgentRunParams {
    * credential linked to the session's profile is added for you.
    */
   credentials?: string[];
-  /** "anthropic" or "openai"; defaults to the first configured provider. */
+  /** "anthropic", "openai", "xai" or "google"; defaults to the project's default model (Project settings), else the first provider with a key. */
   provider?: AgentProvider;
   /** e.g. "claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-sol"; defaults to the provider's default model. */
   model?: string;
@@ -1306,7 +1313,6 @@ export type AgentRunErrorCode =
   | "session_ended"
   | "output_invalid"
   | "internal"
-  | "spend_limit"
   | "out_of_credit"
   | "captcha_timeout"
   | "handover_timeout"

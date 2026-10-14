@@ -86,5 +86,7 @@ export {
 export { verifyWebhook, webhookSignatureHeader, WEBHOOK_SIGNATURE_HEADER, WEBHOOK_TOLERANCE_SECONDS, type VerifyWebhookOptions } from "./webhooks.js";
 export { VERSION } from "./version.js";
 export type * from "./types.js";
+// The class ProjectSettings (`client.project`) shadows the settings data type of that name: this is the data.
+export type { ProjectSettings as ProjectSettingsData } from "./types.js";
 
 export { Boxline as default } from "./client.js";

@@ -565,8 +565,8 @@ Every request carries `Boxline-SDK: node/<version>`.
 
 ## Every method
 
-Every public API operation has a method (the Python SDK has the same names in snake_case; the full list is
-`docs/sdk-methods.json` in the platform repository). Session methods take the id first; a `Session` object has the
+Every public API operation has a method (the Python SDK has the same names in snake_case). Session methods take the id
+first; a `Session` object has the
 same methods without it (`session.stop()`).
 
 | Area | Methods |

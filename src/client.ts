@@ -461,8 +461,8 @@ export class Sessions {
    * Runs a command in the session's shell (persistent bash by default: cd/export survive between calls) and returns its
    * output. ShellDisabledError (409) on a session created without `shell: true`. It is read as a stream (headers at once, the API keeps the connection
    * alive), so neither a long command nor a wait for the session's setup runs into an HTTP client's own limits
-   * (Node's fetch gives up after 300 s without headers or data). Output past 64 KB is cut in the middle, as
-   * `truncated` says.
+   * (Node's fetch gives up after 300 s without headers or data). Each of stdout and stderr keeps its first 64 KiB and last
+   * 448 KiB, with the middle cut, as `truncated` says.
    */
   async exec(id: string, command: string, opts: ExecOptions = {}, options?: RequestOptions): Promise<ExecResult> {
     const out = { stdout: new Capture(), stderr: new Capture() };
@@ -487,21 +487,25 @@ export class Sessions {
   /**
    * Runs Playwright code inside the session's own sandbox (needs a browser and a shell), streaming its output to `onData`. In
    * scope: `page`, `context`, `browser`, `env`, and `step()`, `extract()`, `useModel(model)` / `useModel(provider,
-   * model)`. A step or extract uses the call's own `{provider, model}`, else the last `useModel()`, else `ai`.
+   * model)`. A step or extract uses the call's own `{provider, model}`, else the last `useModel()`, else `ai`. It waits for
+   * the session's setup commands first (the API sends `waiting` lines meanwhile).
    */
   async runScript(id: string, code: string, opts: RunScriptOptions = {}, options?: RequestOptions): Promise<ScriptResult> {
     const { signal, onData: _onData, ...body } = opts;
-    const res = await this.client.send("POST", `${sid(id)}/browser/script`, { code, ...body }, { signal, ...options });
+    // An API from before scripts sent headers early answers only once setup is done.
+    const limit = atLeast(this.client, options, (opts.timeoutMs ?? 120_000) + 30_000 + 600_000);
+    const res = await this.client.send("POST", `${sid(id)}/browser/script`, { code, ...body }, { signal, ...limit });
     let stdout = "";
     let stderr = "";
     let exit = { exitCode: null as number | null, timedOut: false, durationMs: 0 };
-    for await (const msg of ndjson<{ type: string; data?: string; exitCode?: number | null; timedOut?: boolean; durationMs?: number }>(res.body!)) {
+    for await (const msg of ndjson<{ type: string; data?: string; exitCode?: number | null; timedOut?: boolean; durationMs?: number; status?: number; code?: string; message?: string; requestId?: string }>(res.body!)) {
       if (msg.type === "exit") exit = { exitCode: msg.exitCode ?? null, timedOut: Boolean(msg.timedOut), durationMs: msg.durationMs ?? 0 };
       else if (msg.type === "stdout" || msg.type === "stderr") {
         if (msg.type === "stdout") stdout += msg.data ?? "";
         else stderr += msg.data ?? "";
         opts.onData?.(msg.type, msg.data ?? "");
-      }
+      } else if (msg.type === "error") throw makeError(msg.status ?? 500, msg.code ?? "internal", msg.message ?? "the script failed", { requestId: msg.requestId ?? null });
+      // "waiting" (for the session's setup) and "ping" lines only keep the connection open.
     }
     return { stdout, stderr, ...exit };
   }
