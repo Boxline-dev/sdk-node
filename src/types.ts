@@ -141,12 +141,21 @@ export interface ModelKey {
   lastUsedAt: string | null;
   /** The platform can make calls for this provider for this project (a server key exists and the plan includes it). */
   platformAvailable: boolean;
+  /** anthropic: Claude prompt caching for agent runs on the project's own key ("off" by default); null for the others. */
+  promptCaching?: PromptCaching | null;
 }
+/** Claude prompt caching on the project's own key: off, or on with the cache's lifetime (5 minutes or 1 hour). */
+export type PromptCaching = "off" | "5m" | "1h";
 export interface ModelKeyParams {
   /** The provider key (20 to 400 characters). Saving one without `use` sets `use: "project"`. */
   key?: string;
   /** "project" needs a saved key; "platform" needs a plan with `platformModels` (402 otherwise). */
   use?: ModelKeySource;
+  /**
+   * anthropic only: agent runs on the project's own key send `cache_control: {type: "ephemeral"}` (and `ttl: "1h"` for
+   * "1h"), so each call of a run reads the conversation so far from Anthropic's cache. Runs on Boxline's key never cache.
+   */
+  promptCaching?: PromptCaching;
 }
 
 /** What `project.setSettings` takes: the fields you send change, the others stay. */
@@ -1373,6 +1382,10 @@ export interface StepShell {
 export interface StepUsage {
   inputTokens: number;
   outputTokens: number;
+  /** With prompt caching: input tokens read from the cache (not in `inputTokens`). */
+  cacheReadTokens?: number;
+  /** With prompt caching: input tokens written to the cache (not in `inputTokens`). */
+  cacheWriteTokens?: number;
   /** Null for a model that is not priced. */
   costUsd: number | null;
 }
@@ -1432,6 +1445,18 @@ export interface AgentStep {
  * for a run with an `output` schema: read it as `bx.agent.get<Books>(id)` / `bx.agent.wait<Books>(id)`, or with
  * `unknown` and check it yourself.
  */
+/** A run's model tokens and their list-price cost. With prompt caching, the cached tokens are apart from `inputTokens`. */
+export interface RunUsage {
+  /** Input tokens not read from or written to the prompt cache. */
+  inputTokens: number;
+  outputTokens: number;
+  /** With prompt caching: input tokens read from the cache. */
+  cacheReadTokens?: number;
+  /** With prompt caching: input tokens written to the cache. */
+  cacheWriteTokens?: number;
+  costUsd: number | null;
+}
+
 export interface AgentRun<T = string> {
   id: string;
   /** paused: a person has the browser (`agent.pause`, a CAPTCHA, or the agent asked for help). */
@@ -1444,6 +1469,8 @@ export interface AgentRun<T = string> {
   model: string;
   /** Whose key paid for the run's model calls: "project" is the project's own key (no model charge from Boxline). */
   keySource: ModelKeySource;
+  /** Claude prompt caching the run used ("5m" or "1h": the project's own key with `promptCaching` on, as set when it started), or null. */
+  promptCache?: "5m" | "1h" | null;
   mode: AgentMode;
   /** Its limits: steps (null: none), model cost in USD (null: none), tool errors in a row. */
   maxSteps?: number | null;
@@ -1470,7 +1497,7 @@ export interface AgentRun<T = string> {
   resumable?: { until: string } | null;
   /** The names of the run's own variables (never values): agent.resume needs their values again. */
   variableNames?: string[];
-  usage: { inputTokens: number; outputTokens: number; costUsd: number | null };
+  usage: RunUsage;
   /** Set while paused: who asked for the handover and why ("captcha": the run continues by itself once it is solved). */
   handover: { by: "user" | "agent" | "captcha"; reason: string | null } | null;
   /** Set when a task started the run (tasks.run, or its schedule). */
@@ -1688,7 +1715,7 @@ export interface TaskRun<T = unknown> {
   error: string | null;
   /** e.g. "output_invalid", or why a scheduled run could not start ("no_capacity", "missing_variables", "not_started", …). */
   errorCode: string | null;
-  usage: { inputTokens: number; outputTokens: number; costUsd: number | null };
+  usage: RunUsage;
   durationMs: number | null;
   createdAt: string;
   finishedAt: string | null;
@@ -1997,7 +2024,7 @@ export interface WebhookAgentRunFinishedData {
   /** The names of the run's own variables (never values): resuming it needs their values again. */
   variableNames: string[];
   messages: number;
-  usage: { inputTokens: number; outputTokens: number; costUsd: number | null };
+  usage: RunUsage;
   taskId: string | null;
   taskRunId: string | null;
   createdAt: string;
@@ -2066,7 +2093,7 @@ export interface WebhookTaskRunFinishedData {
   structured: boolean;
   error: string | null;
   errorCode: string | null;
-  usage: { inputTokens: number; outputTokens: number; costUsd: number | null };
+  usage: RunUsage;
   variables: string[];
   createdAt: string | null;
   finishedAt: string | null;

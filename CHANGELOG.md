@@ -2,6 +2,15 @@
 
 All notable changes to `@boxline/sdk`. The SDK follows [semantic versioning](https://semver.org).
 
+## Unreleased
+
+### Added
+
+- Claude prompt caching on your own Anthropic key: `project.setModelKey("anthropic", { promptCaching: "5m" | "1h" | "off" })`
+  (`ModelKey.promptCaching`). Agent runs on your own key then send `cache_control`, and `AgentRun.promptCache`,
+  `RunUsage.cacheReadTokens` / `cacheWriteTokens` and `StepUsage` (the same two) report the cached tokens, which
+  `costUsd` prices.
+
 ## 3.2.0 (2026-10-14)
 
 Types for what the API already returns, and `runScript` that waits for setup. Additions only; nothing breaks.
