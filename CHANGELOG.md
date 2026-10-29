@@ -6,6 +6,14 @@ All notable changes to `@boxline/sdk`. The SDK follows [semantic versioning](htt
 
 ### Added
 
+- A model key for one run: `agent.run({ ..., provider, modelKey })` (also `agent.resume(id, { modelKey })`, `extract({ modelKey })`
+  and the `step` / `extract` actions' `modelKey`). The key pays for that run's model calls only: Boxline never stores it,
+  there is no model charge from Boxline, and the run says `keySource: "run"` (`CallKeySource`). A resume needs it again
+  (`errorCodes.modelKeyRequired`). `promptCaching` on `agent.run` turns Claude prompt caching on or off for one run on your own
+  Anthropic key.
+- OpenRouter as a provider (`AgentProvider` `"openrouter"`): your own key only (`project.setModelKey("openrouter", { key })`, or
+  `modelKey`), any OpenRouter model id as `model` (e.g. `"anthropic/claude-sonnet-4.5"`), tools mode only; `usage.costUsd` is
+  the cost OpenRouter reports. `agent.models()` marks it `anyModel: true` (no listed models).
 - Claude prompt caching on your own Anthropic key: `project.setModelKey("anthropic", { promptCaching: "5m" | "1h" | "off" })`
   (`ModelKey.promptCaching`). Agent runs on your own key then send `cache_control`, and `AgentRun.promptCache`,
   `RunUsage.cacheReadTokens` / `cacheWriteTokens` and `StepUsage` (the same two) report the cached tokens, which

@@ -77,9 +77,11 @@ export const ErrorCode = {
   tooManyMessages: "too_many_messages",
   /** 409: pause, resume or sendMessage on a run whose server stopped (resume it once it shows as failed with `server_restarted`). */
   runNotLive: "run_not_live",
-  /** 400: project.setModelKey when the provider does not accept the key (nothing is saved). */
+  /** 400: project.setModelKey when the provider does not accept the key (nothing is saved), or a `modelKey` of the wrong shape. */
   invalidModelKey: "invalid_model_key",
-  /** 400: a call on the project's own model key was refused by the provider (a run ends with this errorCode); never falls back to Boxline's key. */
+  /** 400: agent.resume on a run that brought its own key (keySource "run") without `modelKey` (it is never stored). */
+  modelKeyRequired: "model_key_required",
+  /** 400: a call on an own model key (the project's, or `modelKey`) was refused by the provider (a run ends with this errorCode); never falls back to Boxline's key. */
   modelKeyRejected: "model_key_rejected",
   /** 502: another failure of a call on the project's own model key (the provider's text, key scrubbed). */
   modelError: "model_error",

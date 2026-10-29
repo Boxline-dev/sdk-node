@@ -11,10 +11,15 @@ export type CaptchaMode = "ask" | "ignore" | "solve";
 /** A CAPTCHA provider the platform recognises. */
 export type CaptchaKind = "recaptcha" | "hcaptcha" | "turnstile" | "cloudflare" | "datadome" | "arkose" | "human";
 export type WaitUntil = "load" | "domcontentloaded" | "networkidle" | "commit";
-/** Model providers: Anthropic Claude, OpenAI, Grok (xAI) and Google Gemini. Grok and Gemini have no computer use (mode "computer"). */
-export type AgentProvider = "anthropic" | "openai" | "xai" | "google";
+/**
+ * Model providers: Anthropic Claude, OpenAI, Grok (xAI), Google Gemini and OpenRouter (your own key only; any of its model
+ * ids, e.g. "anthropic/claude-sonnet-4.5"). Grok, Gemini and OpenRouter have no computer use (mode "computer").
+ */
+export type AgentProvider = "anthropic" | "openai" | "xai" | "google" | "openrouter";
 /** Whose key a model call uses: the project's own ("project": no model charge from Boxline) or the platform's. */
 export type ModelKeySource = "project" | "platform";
+/** Whose key paid for a run's or call's model calls: also "run", a key sent with the request (`modelKey`; no model charge). */
+export type CallKeySource = ModelKeySource | "run";
 export interface Viewport {
   width: number;
   height: number;
@@ -581,10 +586,12 @@ export type Action =
       allowWithExtensions?: boolean;
       provider?: AgentProvider;
       model?: string;
+      /** A key of the provider for this step only, never stored (keySource "run"). */
+      modelKey?: string;
       targetId?: string;
     }
   /** Structured data from the current page (instruction and/or JSON Schema). */
-  | { action: "extract"; instruction?: string; schema?: Record<string, unknown>; provider?: AgentProvider; model?: string; targetId?: string }
+  | { action: "extract"; instruction?: string; schema?: Record<string, unknown>; provider?: AgentProvider; model?: string; modelKey?: string; targetId?: string }
   /**
    * Signs the browser in with a password credential (default: the one the session's profile links) in one call, see
    * Session.login. It runs alone: the only action of its request.
@@ -1054,7 +1061,13 @@ export interface ExtractParams {
   /** A JSON Schema for the result. */
   schema?: Record<string, unknown>;
   provider?: AgentProvider;
+  /** Default: the provider's fast model; OpenRouter needs one. */
   model?: string;
+  /**
+   * An API key of the provider for this call only (keySource "run"): never stored by Boxline, no model charge from
+   * Boxline. Its provider is `provider`, else the one whose catalog lists `model`.
+   */
+  modelKey?: string;
   proxy?: ProxyOption;
   browser?: boolean | BrowserOptions;
   waitUntil?: WaitUntil;
@@ -1068,7 +1081,7 @@ export interface ExtractResult<T = unknown> {
   data: T;
   provider: AgentProvider;
   model: string;
-  keySource: ModelKeySource;
+  keySource: CallKeySource;
   usage: ModelUsage;
   /**
    * Every page asked for, in order. With several `urls`, a page that did not load (`page_unreachable`,
@@ -1188,6 +1201,8 @@ export interface AgentModelCatalog {
     /** Whose key a call would use now; null when there is none. */
     keySource: ModelKeySource | null;
     reason: string | null;
+    /** Any model id of the provider's own catalog may be sent (OpenRouter: `models` is empty and a run names its `model`). */
+    anyModel?: boolean;
     models: {
       id: string;
       name: string;
@@ -1260,10 +1275,24 @@ export interface AgentRunParams {
    * credential linked to the session's profile is added for you.
    */
   credentials?: string[];
-  /** "anthropic", "openai", "xai" or "google"; defaults to the project's default model (Project settings), else the first provider with a key. */
+  /** "anthropic", "openai", "xai", "google" or "openrouter"; defaults to the project's default model (Project settings), else the first provider with a key. */
   provider?: AgentProvider;
-  /** e.g. "claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-sol"; defaults to the provider's default model. */
+  /**
+   * e.g. "claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-sol"; defaults to the provider's default model. With provider
+   * "openrouter": any OpenRouter model id ("vendor/model"), required.
+   */
   model?: string;
+  /**
+   * An API key of the provider for this run only (keySource "run"): held in memory while the run works, never stored by
+   * Boxline, no model charge from Boxline, works on every plan. Its provider is `provider`, else the one whose catalog
+   * lists `model`. A resume needs it again (`ResumeRunParams.modelKey`).
+   */
+  modelKey?: string;
+  /**
+   * Claude prompt caching for this run, with your own Anthropic key only (`modelKey`, or the project's own key, where it
+   * overrides the key's setting). Default: the project key's setting; with `modelKey`, "off".
+   */
+  promptCaching?: PromptCaching;
   /**
    * "computer": the model drives the page with its provider's own computer-use tool on screenshots (models with
    * supportsComputerUse in agent.models(); 400 otherwise, or without a browser). Default "tools".
@@ -1299,8 +1328,8 @@ export interface AgentRunStarted {
   sessionExpiresAt?: string | null;
   provider: AgentProvider;
   model: string;
-  /** Whose key pays for the run's model calls ("project": the project's own key, no model charge from Boxline). */
-  keySource: ModelKeySource;
+  /** Whose key pays for the run's model calls ("project": the project's own key, "run": modelKey; no model charge from Boxline for either). */
+  keySource: CallKeySource;
   mode: AgentMode;
 }
 
@@ -1346,6 +1375,8 @@ export interface ResumeRunParams {
    * shell rule they had (MissingVariablesError when one is missing).
    */
   variables?: Record<string, string | { value: string }>;
+  /** A key of the run's provider for the rest of the run (keySource "run"). A run that brought its own key needs it again. */
+  modelKey?: string;
 }
 
 /** agent.sendMessage's answer: queued for the agent's next step. */
@@ -1467,9 +1498,9 @@ export interface AgentRun<T = string> {
   sessionExpiresAt?: string | null;
   provider: AgentProvider;
   model: string;
-  /** Whose key paid for the run's model calls: "project" is the project's own key (no model charge from Boxline). */
-  keySource: ModelKeySource;
-  /** Claude prompt caching the run used ("5m" or "1h": the project's own key with `promptCaching` on, as set when it started), or null. */
+  /** Whose key paid for the run's model calls: "project" (the project's own key) or "run" (`modelKey`): no model charge from Boxline. */
+  keySource: CallKeySource;
+  /** Claude prompt caching the run used ("5m" or "1h": an own Anthropic key with prompt caching on, as set when it started), or null. */
   promptCache?: "5m" | "1h" | null;
   mode: AgentMode;
   /** Its limits: steps (null: none), model cost in USD (null: none), tool errors in a row. */
